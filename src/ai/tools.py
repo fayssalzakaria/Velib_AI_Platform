@@ -22,7 +22,10 @@ def get_station_info_tool(station_name: str, df: pd.DataFrame) -> dict:
     if df is None or df.empty:
         return {"error": "Données temps réel non disponibles."}
 
-    results = df[df["name"].str.contains(station_name.upper(), na=False)]
+    from src.data.filters import search_stations
+
+    # Recherche insensible aux accents et à l'ordre des mots (« republique » → « RÉPUBLIQUE »)
+    results = search_stations(df, station_name)
 
     if results.empty:
         return {"error": f"Station '{station_name}' non trouvée."}
