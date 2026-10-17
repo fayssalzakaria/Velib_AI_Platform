@@ -13,6 +13,7 @@ qdrant-client
 reportlab
 fastapi
 uvicorn
+anthropic==1.15.0
 langchain-core
 langchain-groq
 pydantic

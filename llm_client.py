@@ -1,9 +1,13 @@
 """
-llm_client.py — Client LLM centralisé pour Groq
+llm_client.py — Gateway LLM : un seul point d'entrée pour Groq et Claude.
 
-Objectif :
-- Éviter de répéter requests.post(...) dans agent.py, rag.py, chatbot.py, report_generator.py
-- Centraliser le modèle, l'URL, les erreurs, le JSON parsing et le calcul des tokens
+Routage par tâche :
+- Groq (gpt-oss-120b) : routage, HyDE, synthèses, RAG, agent simple — rapide et quasi gratuit
+- Claude Haiku 5.5    : juge de pertinence — un autre modèle que celui qui répond (moins de biais)
+- Claude Opus 5.5     : agent opérateur et escalade des réponses faibles — raisonnement complexe
+
+La gateway centralise aussi la mesure (appels, tokens, latence, coût par modèle), le plafond
+de dépense Claude, le prompt caching Claude et les erreurs explicites.
 """
 
 import json
@@ -13,6 +17,7 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -23,8 +28,16 @@ GROQ_URL = os.environ.get(
     "GROQ_URL",
     "https://api.groq.com/openai/v1/chat/completions",
 )
-
 DEFAULT_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+CLAUDE_JUDGE_MODEL = "claude-haiku-5-5"
+CLAUDE_COMPLEX_MODEL = "claude-opus-5-5"
+# Plafond mensuel de dépense Claude suivi par l'application (filet de sécurité : la limite
+# de dépense de la console Anthropic). Au-delà, les tâches Claude repassent sur Groq.
+CLAUDE_MONTHLY_BUDGET_USD = float(os.environ.get("CLAUDE_MONTHLY_BUDGET_USD", 80))
+# Repli serveur en cas de refus des classifieurs de sécurité (Opus 5.5 ; pas disponible sur Haiku 5.5)
+_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 # Les modèles qui raisonnent consomment des tokens de réflexion dans la même limite
 # que la réponse : on réduit la réflexion et on garantit un minimum de tokens.
@@ -33,14 +46,19 @@ MIN_TOKENS_REASONING_MODEL = 1024
 _THINK_TAGS = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
-# Tarifs Groq en $ par million de tokens (entrée, sortie), relevés sur /models.
-# Sur l'offre gratuite rien n'est facturé : c'est le coût équivalent en offre payante.
+# Tarifs en $ par million de tokens : (entrée, sortie, lecture du cache, écriture du cache).
+# Groq : relevés sur /models (rien n'est facturé sur l'offre gratuite : coût équivalent payant).
+# Claude : tarifs publics ; écriture du cache ≈ 1,25 × entrée, lecture ≈ 0,1 × entrée.
 PRICES_PER_MILLION = {
-    "openai/gpt-oss-120b": (0.15, 0.60),
-    "openai/gpt-oss-20b": (0.075, 0.30),
-    "qwen/qwen3.8-27b": (0.80, 4.00),
+    "openai/gpt-oss-120b": (0.15, 0.60, 0.0, 0.0),
+    "openai/gpt-oss-20b": (0.075, 0.30, 0.0, 0.0),
+    "qwen/qwen3.8-27b": (0.80, 4.00, 0.0, 0.0),
+    "claude-opus-5-5": (4.00, 20.00, 0.20, 5.00),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01, 0.125),
 }
 
+
+# ---------------------------------------------------------------- mesure de la consommation
 
 @dataclass
 class UsageReport:
@@ -52,6 +70,7 @@ class UsageReport:
     llm_seconds: float = 0.0
     cost_usd: float = 0.0
     models: set = field(default_factory=set)
+    by_model: dict = field(default_factory=dict)
 
     @property
     def total_tokens(self) -> int:
@@ -66,11 +85,15 @@ class UsageReport:
             "total_tokens": self.total_tokens,
             "llm_seconds": round(self.llm_seconds, 2),
             "cost_usd": round(self.cost_usd, 6),
+            "by_model": {m: {k: round(v, 6) if isinstance(v, float) else v for k, v in d.items()}
+                         for m, d in self.by_model.items()},
         }
 
 
 # Pile des mesures actives : un appel compte dans toutes (ex. l'assistant qui délègue à l'agent)
 _active_reports: ContextVar[tuple] = ContextVar("llm_usage", default=())
+# Dépense Claude de l'application, par mois (par processus : la limite de la console reste le plafond dur)
+_claude_spend: dict[str, float] = {}
 
 
 @contextmanager
@@ -84,19 +107,41 @@ def track_usage():
         _active_reports.reset(token)
 
 
-def _record_usage(model: str, usage: dict | None, seconds: float, error: bool = False) -> None:
-    usage = usage or {}
-    prompt, completion = usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
-    price_in, price_out = PRICES_PER_MILLION.get(model, (0.0, 0.0))
+def _cost(model: str, prompt: int, completion: int, cache_read: int = 0, cache_write: int = 0) -> float:
+    price_in, price_out, price_read, price_write = PRICES_PER_MILLION.get(model, (0.0, 0.0, 0.0, 0.0))
+    return (prompt * price_in + completion * price_out + cache_read * price_read + cache_write * price_write) / 1_000_000
+
+
+def _record_usage(model: str, prompt: int, completion: int, seconds: float, error: bool = False,
+                  cache_read: int = 0, cache_write: int = 0) -> None:
+    cost = _cost(model, prompt, completion, cache_read, cache_write)
+    if model.startswith("claude"):
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        _claude_spend[month] = _claude_spend.get(month, 0.0) + cost
     for report in _active_reports.get():
         report.calls += 1
         report.errors += int(error)
-        report.prompt_tokens += prompt
+        report.prompt_tokens += prompt + cache_read + cache_write
         report.completion_tokens += completion
         report.llm_seconds += seconds
-        report.cost_usd += (prompt * price_in + completion * price_out) / 1_000_000
+        report.cost_usd += cost
         report.models.add(model)
+        per_model = report.by_model.setdefault(model, {"calls": 0, "tokens": 0, "cost_usd": 0.0})
+        per_model["calls"] += 1
+        per_model["tokens"] += prompt + cache_read + cache_write + completion
+        per_model["cost_usd"] += cost
 
+
+def claude_spend_this_month() -> float:
+    return _claude_spend.get(datetime.now(timezone.utc).strftime("%Y-%m"), 0.0)
+
+
+def claude_available() -> bool:
+    """Claude est utilisable : clé configurée et plafond mensuel de l'application non atteint."""
+    return bool(ANTHROPIC_API_KEY) and claude_spend_this_month() < CLAUDE_MONTHLY_BUDGET_USD
+
+
+# ---------------------------------------------------------------- Groq
 
 MAX_RATE_LIMIT_RETRIES = 2
 
@@ -138,17 +183,7 @@ def call_llm(
     temperature: float = 0.2,
     timeout: int = 30,
 ) -> dict[str, Any]:
-    """
-    Appelle le modèle Groq et retourne la réponse JSON complète.
-
-    Utilisé pour :
-    - chatbot simple
-    - RAG
-    - agent IA avec tools
-    - génération de rapport
-    - évaluation de pertinence
-    """
-
+    """Appel Groq (format OpenAI) : texte, JSON et outils. Renvoie la réponse JSON complète."""
     if not GROQ_API_KEY:
         raise RuntimeError("Clé GROQ_API_KEY non configurée.")
 
@@ -158,11 +193,9 @@ def call_llm(
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
-
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = tool_choice or "auto"
-
     if _is_reasoning_model(model):
         payload["reasoning_effort"] = REASONING_EFFORT
         payload["max_tokens"] = max(max_tokens, MIN_TOKENS_REASONING_MODEL)
@@ -184,10 +217,12 @@ def call_llm(
         time.sleep(_retry_delay(response))
 
     if not response.ok:
-        _record_usage(model, None, time.perf_counter() - started, error=True)
+        _record_usage(model, 0, 0, time.perf_counter() - started, error=True)
     _raise_for_groq_error(response)
     data = response.json()
-    _record_usage(model, data.get("usage"), time.perf_counter() - started)
+    usage = data.get("usage") or {}
+    _record_usage(model, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
+                  time.perf_counter() - started)
 
     # Réponse normalisée : texte sans réflexion, et pas de champ « reasoning »
     # (l'agent renvoie ce message à Groq lors du second appel)
@@ -207,49 +242,29 @@ def call_llm_text(
     temperature: float = 0.2,
     timeout: int = 30,
 ) -> tuple[str, dict[str, int]]:
-    """
-    Appel simple texte -> texte.
-
-    Retourne :
-    - réponse texte
-    - informations tokens
-    """
-
+    """Appel simple texte -> texte (Groq). Renvoie la réponse et les tokens."""
     messages = []
-
     if system_prompt:
-        messages.append(
-            {
-                "role": "system",
-                "content": system_prompt,
-            }
-        )
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
 
-    messages.append(
-        {
-            "role": "user",
-            "content": prompt,
-        }
-    )
-
-    data = call_llm(
-        messages,
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        timeout=timeout,
-    )
-
-    answer = data["choices"][0]["message"].get("content", "")
+    data = call_llm(messages, model=model, max_tokens=max_tokens, temperature=temperature, timeout=timeout)
     usage = data.get("usage", {})
-
-    tokens = {
+    return data["choices"][0]["message"].get("content", ""), {
         "prompt": usage.get("prompt_tokens", 0),
         "completion": usage.get("completion_tokens", 0),
         "total": usage.get("total_tokens", 0),
     }
 
-    return answer, tokens
+
+def _parse_json(text: str) -> dict[str, Any]:
+    cleaned = text.strip()
+    if "```" in cleaned:
+        cleaned = cleaned.replace("```json", "").replace("```JSON", "").replace("```", "").strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Réponse LLM non JSON valide : {cleaned}") from e
 
 
 def call_llm_json(
@@ -261,41 +276,114 @@ def call_llm_json(
     temperature: float = 0.1,
     timeout: int = 30,
 ) -> tuple[dict[str, Any], dict[str, int]]:
+    """Appel Groq qui doit renvoyer du JSON (les blocs Markdown ```json sont retirés)."""
+    answer, tokens = call_llm_text(prompt, system_prompt=system_prompt, model=model,
+                                   max_tokens=max_tokens, temperature=temperature, timeout=timeout)
+    return _parse_json(answer), tokens
+
+
+# ---------------------------------------------------------------- Claude
+
+class ClaudeRefusal(RuntimeError):
+    """Les classifieurs de sécurité de Claude ont décliné la requête (après repli éventuel)."""
+
+
+_anthropic_singleton = None
+
+
+def _anthropic_client():
+    global _anthropic_singleton
+    if _anthropic_singleton is None:
+        import anthropic
+        _anthropic_singleton = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    return _anthropic_singleton
+
+
+def call_claude(
+    *,
+    model: str,
+    system: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+    effort: str | None = None,
+    output_schema: dict[str, Any] | None = None,
+    max_tokens: int = 16000,
+):
     """
-    Appelle le LLM en demandant une réponse JSON.
-
-    Cette fonction nettoie les éventuels blocs Markdown :
-    ```json
-    {...}
-    ```
+    Appel Claude via le SDK officiel. Renvoie le message de l'API.
+    - prompt caching : le préfixe stable (outils + prompt système) est mis en cache
+    - Opus 5.5 : repli serveur automatique en cas de refus (fallbacks="default")
+    - output_schema : sortie JSON garantie conforme au schéma (structured outputs)
     """
+    if not claude_available():
+        raise RuntimeError("Claude indisponible : clé absente ou plafond mensuel atteint.")
 
-    answer, tokens = call_llm_text(
-        prompt,
-        system_prompt=system_prompt,
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        timeout=timeout,
-    )
+    params: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+        "messages": messages,
+    }
+    if tools:
+        params["tools"] = tools
+    output_config: dict[str, Any] = {}
+    if effort:
+        output_config["effort"] = effort
+    if output_schema:
+        output_config["format"] = {"type": "json_schema", "schema": output_schema}
+    if output_config:
+        params["output_config"] = output_config
 
-    cleaned = answer.strip()
+    import anthropic
 
-    if "```" in cleaned:
-        cleaned = (
-            cleaned
-            .replace("```json", "")
-            .replace("```JSON", "")
-            .replace("```", "")
-            .strip()
-        )
-
+    client = _anthropic_client()
+    started = time.perf_counter()
     try:
-        return json.loads(cleaned), tokens
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            f"Réponse LLM non JSON valide : {cleaned}"
-        ) from e
+        if model == CLAUDE_COMPLEX_MODEL:
+            response = client.beta.messages.create(**params, betas=[_FALLBACK_BETA], fallbacks="default")
+        else:
+            response = client.messages.create(**params)
+    except anthropic.APIStatusError as e:
+        _record_usage(model, 0, 0, time.perf_counter() - started, error=True)
+        raise RuntimeError(f"Claude {e.status_code} : {e.message}") from e
+    except anthropic.APIConnectionError as e:
+        _record_usage(model, 0, 0, time.perf_counter() - started, error=True)
+        raise RuntimeError(f"Claude injoignable : {e}") from e
+
+    usage = response.usage
+    _record_usage(
+        model, usage.input_tokens, usage.output_tokens, time.perf_counter() - started,
+        cache_read=getattr(usage, "cache_read_input_tokens", 0) or 0,
+        cache_write=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+    )
+    if response.stop_reason == "refusal":
+        raise ClaudeRefusal("Claude a décliné la requête.")
+    return response
+
+
+def claude_text(response) -> str:
+    return "".join(block.text for block in response.content if block.type == "text").strip()
+
+
+# ---------------------------------------------------------------- juge de pertinence
+
+_JUDGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "integer"},
+        "explication": {"type": "string"},
+    },
+    "required": ["score", "explication"],
+    "additionalProperties": False,
+}
+
+_JUDGE_SYSTEM = """Tu évalues la qualité des réponses d'un assistant sur le réseau Vélib' de Paris.
+Note la réponse de 0 à 100 au regard de la question et des données fournies, et explique la note
+en une ou deux phrases.
+- 90-100 : précise, entièrement fondée sur les données, sans invention
+- 70-89 : correcte mais incomplète
+- 50-69 : partiellement correcte
+- 0-49 : incorrecte, ou affirme des faits absents des données"""
 
 
 def verify_relevance(
@@ -306,53 +394,23 @@ def verify_relevance(
     evaluator_name: str = "système RAG",
 ) -> tuple[int, str]:
     """
-    Évalue automatiquement la pertinence d'une réponse par rapport aux données.
-
-    Retourne :
-    - score entre 0 et 100
-    - explication courte
+    Note la pertinence d'une réponse (0-100) et l'explique.
+    Juge : Claude Haiku 5.5 si disponible (un autre modèle que celui qui répond), sinon Groq.
     """
-
-    prompt = f"""Tu es un évaluateur de qualité pour un {evaluator_name}.
-
-Évalue la pertinence de la réponse par rapport à la question et aux données fournies.
-
-Question :
-{question}
-
-Données utilisées :
-{context[:2000]}
-
-Réponse générée :
-{answer[:1500]}
-
-Réponds UNIQUEMENT avec un JSON valide :
-{{
-  "score": <entier entre 0 et 100>,
-  "explication": "<1 ou 2 phrases expliquant le score>"
-}}
-
-Critères :
-- 90-100 : réponse précise, basée sur les données, sans hallucination
-- 70-89 : réponse correcte mais incomplète
-- 50-69 : réponse partiellement correcte
-- 0-49 : réponse incorrecte ou hallucinée
-"""
-
+    content = (f"Système évalué : {evaluator_name}\n\nQuestion :\n{question}\n\n"
+               f"Données utilisées :\n{context[:2000]}\n\nRéponse générée :\n{answer[:1500]}")
     try:
-        data, _ = call_llm_json(
-            prompt,
-            max_tokens=200,
-            temperature=0.1,
-            timeout=20,
-        )
-
-        score = int(data.get("score", 0))
-        explanation = data.get("explication", "")
-
-        score = max(0, min(100, score))
-
-        return score, explanation
-
+        if claude_available():
+            response = call_claude(model=CLAUDE_JUDGE_MODEL, system=_JUDGE_SYSTEM,
+                                   messages=[{"role": "user", "content": content}],
+                                   effort="low", output_schema=_JUDGE_SCHEMA, max_tokens=2000)
+            data = json.loads(claude_text(response))
+        else:
+            data, _ = call_llm_json(
+                f"{_JUDGE_SYSTEM}\n\n{content}\n\nRéponds UNIQUEMENT avec un JSON valide : "
+                '{"score": <entier entre 0 et 100>, "explication": "<1 ou 2 phrases>"}',
+                max_tokens=200, temperature=0.1, timeout=20,
+            )
+        return max(0, min(100, int(data.get("score", 0)))), data.get("explication", "")
     except Exception as e:
         return 0, f"Erreur évaluation : {e}"
