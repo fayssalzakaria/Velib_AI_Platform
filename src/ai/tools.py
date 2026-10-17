@@ -145,6 +145,25 @@ def search_history_rag_tool(
     )
 
 
+def search_history_tool(query: str, rag_documents=None, qdrant_client=None, rerank: bool = True) -> dict:
+    """
+    Recherche dans l'historique (profils des stations) : RAG hybride via le retriever LangChain,
+    ou recherche sémantique Qdrant si l'index RAG n'est pas chargé.
+    """
+    if rag_documents:
+        from src.ai.retriever import ProfileRetriever
+
+        docs = ProfileRetriever(documents=rag_documents, k=5, use_rerank=rerank).invoke(query)
+        return {
+            "resultats": [d.page_content for d in docs],
+            "sources": [f"{d.metadata['station']} — {d.metadata['run_at']}" for d in docs],
+            "techniques_utilisees": docs[0].metadata.get("techniques", []) if docs else [],
+        }
+    if qdrant_client is not None:
+        return {"resultats": semantic_search(query, qdrant_client, n_results=5), "techniques_utilisees": ["Qdrant"]}
+    return {"error": "Historique non disponible"}
+
+
 def semantic_search_tool(
     question: str,
     qdrant_client,
