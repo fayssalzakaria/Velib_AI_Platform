@@ -14,7 +14,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pandas as pd
-from llm_client import call_llm_text, track_usage, verify_relevance
+from llm_client import (
+    CLAUDE_COMPLEX_MODEL, call_claude, call_llm_text, claude_available, claude_text, track_usage, verify_relevance,
+)
 from src.ai.prompts import FINAL_SYNTHESIS_PROMPT
 from src.ai.router import classify_question
 from src.ai.tools import (
@@ -44,6 +46,8 @@ class AssistantTrace:
     relevance_explanation: str = ""
     final_answer: str = ""
     delegated_to_agent: bool = False
+    escalated: bool = False
+    escalation_note: str = ""
     latency_s: float = 0.0
     usage: dict = field(default_factory=dict)
 
@@ -107,6 +111,25 @@ Produis la réponse finale.
         temperature=0.2,
         timeout=30,
     )
+
+
+# En dessous de cette note du juge, la réponse de Groq est reprise par Claude Opus (cascade)
+ESCALATION_THRESHOLD = 60
+
+
+def _escalate(question: str, intent: str, tool_results_text: str) -> str | None:
+    """Même question, mêmes résultats d'outils, rédigée par Claude Opus 5.5. None en cas d'échec."""
+    try:
+        response = call_claude(
+            model=CLAUDE_COMPLEX_MODEL, system=FINAL_SYNTHESIS_PROMPT, effort="medium", max_tokens=8000,
+            messages=[{"role": "user", "content": (
+                f"Question utilisateur :\n{question}\n\nIntention détectée :\n{intent}\n\n"
+                f"Résultats des outils :\n{tool_results_text}\n\nProduis la réponse finale."
+            )}],
+        )
+        return claude_text(response) or None
+    except Exception:
+        return None
 
 
 def run_unified_assistant(
@@ -294,6 +317,18 @@ def _run_assistant(
 
         trace.relevance_score = score
         trace.relevance_explanation = explanation
+
+        # Cascade : réponse jugée faible → Claude Opus reprend ; on garde la meilleure des deux
+        if score < ESCALATION_THRESHOLD and claude_available():
+            better = _escalate(question, intent, tool_results_text)
+            if better:
+                new_score, new_explanation = _evaluate_unified_answer(
+                    question=question, answer=better, tool_results_text=tool_results_text, intent=intent)
+                trace.escalated = True
+                trace.escalation_note = f"Réponse Groq notée {score}/100 → Claude Opus : {new_score}/100"
+                if new_score >= score:
+                    answer, trace.final_answer = better, better
+                    trace.relevance_score, trace.relevance_explanation = new_score, new_explanation
 
         return answer, trace
 

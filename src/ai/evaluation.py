@@ -44,6 +44,13 @@ EVAL_SET = [
 ]
 
 
+# Questions de rééquilibrage pour l'agent opérateur (plan d'actions, pas de réponse factuelle unique)
+OPERATOR_QUESTIONS = [
+    "Que faut-il rééquilibrer en ce moment ?",
+    "Quelles stations approvisionner en priorité dans les 2 prochaines heures ?",
+]
+
+
 def _normalize_tools(tools: list[str]) -> set[str]:
     return {_TOOL_ALIASES.get(t, t) for t in tools}
 
@@ -87,6 +94,34 @@ def run_benchmark(df, rag_documents=None, qdrant_client=None, cases=EVAL_SET, pa
             on_progress(2 * i + 2, total)
         time.sleep(pause_s)
 
+    return pd.DataFrame(rows)
+
+
+def run_operator_benchmark(df, rag_documents=None, qdrant_client=None, questions=OPERATOR_QUESTIONS,
+                           pause_s: float = 2.0) -> pd.DataFrame:
+    """
+    Agent opérateur : pertinence (juge), part des actions validées par le vérificateur,
+    nombre de corrections, consommation (dont Claude) et latence.
+    """
+    from src.ai.operator_agent import run_operator
+
+    rows = []
+    for question in questions:
+        answer, trace = run_operator(question, df, rag_documents, qdrant_client)
+        proposed = len(trace.plan.get("actions", [])) + answer.count("écartée")
+        rows.append({
+            "system": "Opérateur",
+            "question": question,
+            "relevance": trace.relevance_score,
+            "actions_validees": len(trace.plan.get("actions", [])),
+            "corrections": trace.corrections,
+            "taux_actions_valides": (len(trace.plan.get("actions", [])) / proposed) if proposed else None,
+            "error": answer.startswith("Erreur"),
+            "latency_s": trace.latency_s,
+            "modeles": ", ".join(trace.models),
+            **trace.usage,
+        })
+        time.sleep(pause_s)
     return pd.DataFrame(rows)
 
 

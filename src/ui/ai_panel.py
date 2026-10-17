@@ -100,6 +100,8 @@ def _assistant_details(trace) -> None:
         st.caption(f"Routage : {trace.routing_reason}")
         if trace.delegated_to_agent:
             st.info("Question non reconnue par les règles : l'agent a choisi ses outils lui-même.")
+        if trace.escalated:
+            st.info(f"Escalade : {trace.escalation_note}")
 
         st.caption(
             f"NLP — texte normalisé : `{normalize_text(trace.question)}` · "
@@ -321,7 +323,7 @@ def _render_benchmark(df) -> None:
         fig = px.bar(
             melted[melted["variable"] == metric], x="question", y="value", color="system",
             barmode="group", labels={"value": labels[metric], "question": ""},
-            color_discrete_map={ASSISTANT: "#185FA5", AGENT: "#EF9F27"},
+            color_discrete_map={ASSISTANT: "#185FA5", AGENT: "#EF9F27", OPERATOR: "#1D9E75"},
         )
         fig.update_layout(title=labels[metric], height=320, margin=dict(t=40, b=10), xaxis_showticklabels=False)
         col.plotly_chart(fig, use_container_width=True)
@@ -332,15 +334,32 @@ def _render_benchmark(df) -> None:
                      hide_index=True, use_container_width=True)
 
 
+def _render_operator_benchmark(df) -> None:
+    from src.ai.evaluation import OPERATOR_QUESTIONS, run_operator_benchmark
+
+    st.subheader("Banc d'évaluation : agent opérateur")
+    st.caption(f"{len(OPERATOR_QUESTIONS)} demandes de rééquilibrage : pertinence (juge), actions validées par le "
+               "vérificateur, corrections nécessaires, consommation par modèle et latence.")
+    if st.button("▶️ Évaluer l'agent opérateur"):
+        with st.spinner("Plans en cours…"):
+            st.session_state.operator_benchmark = run_operator_benchmark(df, _rag_documents(), _get_qdrant_client_cached())
+    results = st.session_state.get("operator_benchmark")
+    if results is not None and not results.empty:
+        st.dataframe(results[["question", "relevance", "actions_validees", "corrections",
+                              "llm_calls", "total_tokens", "latency_s", "cost_usd", "modeles"]],
+                     hide_index=True, use_container_width=True)
+
+
 def _render_metrics(df) -> None:
     st.caption(
         "Consommation mesurée sur tous les appels LLM de chaque réponse (routage, HyDE, synthèse, "
-        "juge…). Coût estimé au tarif payant de Groq : rien n'est facturé sur l'offre gratuite."
+        "juge…). Groq : coût estimé au tarif payant (rien n'est facturé sur l'offre gratuite). "
+        "Claude : coût réel débité sur les crédits Anthropic."
     )
     st.subheader("Cette session")
     metrics = pd.DataFrame(st.session_state.get("ai_metrics", []))
     if metrics.empty:
-        st.info("Posez des questions à l'Assistant ou à l'Agent pour voir leurs métriques ici.")
+        st.info("Posez des questions à l'Assistant, à l'Agent ou à l'Opérateur pour voir leurs métriques ici.")
     else:
         st.dataframe(_summary_table(metrics), use_container_width=True)
         st.caption(
@@ -349,6 +368,8 @@ def _render_metrics(df) -> None:
         )
     st.divider()
     _render_benchmark(df)
+    st.divider()
+    _render_operator_benchmark(df)
 
 
 # ---------------------------------------------------------------- point d'entrée

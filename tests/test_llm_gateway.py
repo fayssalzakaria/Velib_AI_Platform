@@ -84,3 +84,39 @@ def test_without_anthropic_key_judge_uses_groq(monkeypatch):
     monkeypatch.setattr(llm_client, "ANTHROPIC_API_KEY", "")
     monkeypatch.setattr(llm_client, "call_llm_json", lambda *a, **k: ({"score": 55, "explication": "g"}, {}))
     assert llm_client.verify_relevance(question="q", answer="a", context="c") == (55, "g")
+
+
+def _assistant_with(monkeypatch, scores):
+    """Assistant sur une question d'anomalies, juge simulé qui renvoie les notes dans l'ordre."""
+    import pandas as pd
+    import src.ai.assistant as assistant
+
+    monkeypatch.setattr(assistant, "_synthesize_answer", lambda *a, **k: ("réponse Groq", {}))
+    notes = iter(scores)
+    monkeypatch.setattr(assistant, "_evaluate_unified_answer", lambda **k: (next(notes), "j"))
+    df = pd.DataFrame([{"station_id": "1", "name": "A", "numbikesavailable": 0, "mechanical": 0, "ebike": 0,
+                        "numdocksavailable": 10, "is_empty": True, "is_full": False, "bike_ratio": 0.0}])
+    return assistant, df
+
+
+def test_weak_groq_answer_is_escalated_to_claude_opus(monkeypatch, fake_claude):
+    sent = fake_claude(text="réponse Claude")
+    assistant, df = _assistant_with(monkeypatch, [40, 85])
+    answer, trace = assistant.run_unified_assistant("Y a-t-il des anomalies ?", df)
+    assert answer == "réponse Claude" and trace.escalated and trace.relevance_score == 85
+    assert sent[0]["model"] == "claude-opus-5-5"
+    assert "40/100" in trace.escalation_note
+
+
+def test_good_groq_answer_is_not_escalated(monkeypatch, fake_claude):
+    sent = fake_claude()
+    assistant, df = _assistant_with(monkeypatch, [90])
+    answer, trace = assistant.run_unified_assistant("Y a-t-il des anomalies ?", df)
+    assert answer == "réponse Groq" and not trace.escalated and sent == []
+
+
+def test_escalation_keeps_groq_answer_if_claude_is_not_better(monkeypatch, fake_claude):
+    fake_claude(text="réponse Claude")
+    assistant, df = _assistant_with(monkeypatch, [50, 30])
+    answer, trace = assistant.run_unified_assistant("Y a-t-il des anomalies ?", df)
+    assert answer == "réponse Groq" and trace.escalated and trace.relevance_score == 50
