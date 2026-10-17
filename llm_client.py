@@ -414,3 +414,23 @@ def verify_relevance(
         return max(0, min(100, int(data.get("score", 0)))), data.get("explication", "")
     except Exception as e:
         return 0, f"Erreur évaluation : {e}"
+
+
+# ---------------------------------------------------------------- tâches complexes
+
+def call_complex_json(*, system: str, prompt: str, schema: dict[str, Any], effort: str = "high",
+                      max_tokens: int = 16000) -> tuple[dict[str, Any], str]:
+    """
+    Tâche complexe à sortie JSON : Claude Opus 5.5 (sortie structurée garantie) si disponible,
+    sinon Groq avec le schéma décrit dans le prompt. Renvoie (données, modèle utilisé).
+    """
+    if claude_available():
+        response = call_claude(model=CLAUDE_COMPLEX_MODEL, system=system,
+                               messages=[{"role": "user", "content": prompt}],
+                               effort=effort, output_schema=schema, max_tokens=max_tokens)
+        return json.loads(claude_text(response)), CLAUDE_COMPLEX_MODEL
+    data, _ = call_llm_json(
+        f"{prompt}\n\nRéponds UNIQUEMENT avec un JSON conforme à ce schéma :\n{json.dumps(schema, ensure_ascii=False)}",
+        system_prompt=system, max_tokens=4000, temperature=0.1, timeout=60,
+    )
+    return data, DEFAULT_MODEL

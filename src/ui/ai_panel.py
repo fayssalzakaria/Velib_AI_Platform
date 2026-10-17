@@ -14,7 +14,9 @@ from src.ai.assistant import run_unified_assistant
 from src.ai.nlp_utils import detect_time_expression, extract_keywords, normalize_text
 from src.ai.vector_store import build_qdrant_index, semantic_search
 
-ASSISTANT, AGENT = "Assistant", "Agent"
+ASSISTANT, AGENT, OPERATOR = "Assistant", "Agent", "Opérateur"
+# Protège les crédits Claude d'une app publique : nombre de plans opérateur par session
+OPERATOR_SESSION_QUOTA = 5
 
 
 # ---------------------------------------------------------------- ressources partagées
@@ -66,8 +68,11 @@ def _metrics_line(trace) -> None:
     score = trace.relevance_score
     color = "green" if (score or 0) >= 80 else "orange" if (score or 0) >= 50 else "red"
     score_txt = f"<span style='color:{color}'>**{score}/100**</span>" if score is not None else "n/a"
+    short = {"openai/gpt-oss-120b": "Groq", "claude-opus-5-5": "Claude Opus", "claude-haiku-5-5": "Claude Haiku"}
+    providers = " · ".join(f"{short.get(m, m)} ×{d['calls']}" for m, d in (usage.get("by_model") or {}).items())
     st.markdown(
-        f"Pertinence {score_txt} · {usage.get('llm_calls', 0)} appels LLM · "
+        f"Pertinence {score_txt} · {usage.get('llm_calls', 0)} appels LLM"
+        f"{f' ({providers})' if providers else ''} · "
         f"{usage.get('total_tokens', 0):,} tokens · {trace.latency_s:.1f} s · "
         f"{usage.get('cost_usd', 0):.4f} $",
         unsafe_allow_html=True,
@@ -195,6 +200,59 @@ def _render_agent(df) -> None:
         st.rerun()
 
 
+# ---------------------------------------------------------------- 🧭 Opérateur (LangGraph)
+
+def _operator_details(trace) -> None:
+    with st.expander("Comment le plan a été construit"):
+        for step in trace.steps:
+            st.caption(f"• {step}")
+        st.caption(f"Modèles : {', '.join(trace.models) or '—'} · corrections : {trace.corrections}")
+        if trace.relevance_explanation:
+            st.caption(f"Évaluation : {trace.relevance_explanation}")
+        if trace.candidates:
+            col_need, col_offer = st.columns(2)
+            col_need.markdown("**À approvisionner**")
+            col_need.dataframe(pd.DataFrame(trace.candidates.get("a_approvisionner", [])), hide_index=True)
+            col_offer.markdown("**Où prendre des vélos**")
+            col_offer.dataframe(pd.DataFrame(trace.candidates.get("ou_prendre", [])), hide_index=True)
+
+
+def _render_operator(df) -> None:
+    from llm_client import CLAUDE_MONTHLY_BUDGET_USD, claude_available, claude_spend_this_month
+    from src.ai.operator_agent import run_operator
+
+    engine = (f"Claude Opus 5.5 (dépense Claude ce mois-ci : {claude_spend_this_month():.2f} $ / "
+              f"{CLAUDE_MONTHLY_BUDGET_USD:.0f} $)" if claude_available() else "Groq (Claude non configuré ou budget atteint)")
+    st.caption(
+        "Système **multi-agents (LangGraph)** : un superviseur choisit les spécialistes (temps réel, prévision, "
+        "historique), un planificateur propose des déplacements de vélos, un vérificateur contrôle chaque chiffre "
+        f"et renvoie corriger si besoin. Moteur : {engine}."
+    )
+    history = st.session_state.setdefault("operator_history", [])
+    for question, answer, trace in history:
+        with st.chat_message("user"):
+            st.write(question)
+        with st.chat_message("assistant"):
+            st.markdown(answer)
+            _metrics_line(trace)
+            _operator_details(trace)
+
+    used = st.session_state.get("operator_runs", 0)
+    if claude_available() and used >= OPERATOR_SESSION_QUOTA:
+        st.info(f"Limite de {OPERATOR_SESSION_QUOTA} plans par session atteinte (protection des crédits Claude).")
+        return
+    question = st.chat_input("Ex : Que faut-il rééquilibrer dans les 2 prochaines heures ?", key="operator_input")
+    if question:
+        with st.status("Agents au travail…", expanded=True) as status:
+            answer, trace = run_operator(question, df, _rag_documents(), _get_qdrant_client_cached(),
+                                         on_step=lambda step: status.write(step))
+            status.update(label="Plan prêt", state="complete")
+        st.session_state.operator_runs = used + 1
+        history.append((question, answer, trace))
+        _record(OPERATOR, question, answer, trace)
+        st.rerun()
+
+
 # ---------------------------------------------------------------- 📊 Qualité & consommation
 
 def _summary_table(results: pd.DataFrame) -> pd.DataFrame:
@@ -303,14 +361,17 @@ def render_ai_tabs() -> None:
     df = render_snapshot_bar(key="ai", label="Données temps réel de l'IA")
     if df is None:
         return
-    tab_assistant, tab_agent, tab_metrics = st.tabs([
+    tab_assistant, tab_agent, tab_operator, tab_metrics = st.tabs([
         "💬 Assistant (routage par règles)",
         "🤖 Agent (le LLM choisit ses outils)",
+        "🧭 Opérateur (multi-agents)",
         "📊 Qualité & consommation",
     ])
     with tab_assistant:
         _render_assistant(df)
     with tab_agent:
         _render_agent(df)
+    with tab_operator:
+        _render_operator(df)
     with tab_metrics:
         _render_metrics(df)
