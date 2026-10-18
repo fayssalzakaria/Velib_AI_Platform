@@ -42,7 +42,11 @@ AGENT_SYSTEM_PROMPT = (
     "État actuel et anomalies : get_station_info, get_network_stats, detect_anomalies. "
     "Habitudes et tendances : search_history. "
     "État d'une station dans 1 à 6 heures (vide, pleine, vélos attendus) : forecast_station. "
-    "N'invente aucune donnée. Réponds en français, de façon concise ; "
+    "Pour comparer une station à ses habitudes, appelle search_history avec le nom exact renvoyé par "
+    "get_station_info, et compare au créneau donné dans « moment » (type de jour et période) ; "
+    "si plusieurs stations correspondent, dis laquelle tu as choisie. "
+    "N'invente aucune donnée, en particulier ni heure ni date : utilise « moment ». "
+    "Réponds en français, de façon concise ; "
     "quand tu listes des stations, cite les plus importantes (10 au maximum) et le nombre total."
 )
 

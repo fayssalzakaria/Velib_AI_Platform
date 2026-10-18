@@ -340,7 +340,7 @@ def run_operator(question: str, df: pd.DataFrame, rag_documents=None, qdrant_cli
             answer = format_plan(trace.plan, dropped)
             trace.relevance_score, trace.relevance_explanation = verify_relevance(
                 question=question, answer=answer, evaluator_name="agent opérateur Vélib",
-                context=json.dumps(trace.candidates, ensure_ascii=False)[:2000])
+                context=json.dumps(trace.candidates, ensure_ascii=False))
         except Exception as e:
             answer = f"Erreur agent opérateur : {e}"
     trace.latency_s = round(time.perf_counter() - started, 2)

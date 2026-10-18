@@ -33,6 +33,8 @@ DEFAULT_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CLAUDE_JUDGE_MODEL = "claude-haiku-5-5"
+# Ce que voit le juge : assez pour vérifier chaque chiffre (sinon il pénalise ce qu'il ne voit pas)
+JUDGE_CONTEXT_CHARS, JUDGE_ANSWER_CHARS = 8000, 4000
 CLAUDE_COMPLEX_MODEL = "claude-opus-5-5"
 # Plafond mensuel de dépense Claude suivi par l'application (filet de sécurité : la limite
 # de dépense de la console Anthropic). Au-delà, les tâches Claude repassent sur Groq.
@@ -399,7 +401,7 @@ def verify_relevance(
     Juge : Claude Haiku 5.5 si disponible (un autre modèle que celui qui répond), sinon Groq.
     """
     content = (f"Système évalué : {evaluator_name}\n\nQuestion :\n{question}\n\n"
-               f"Données utilisées :\n{context[:2000]}\n\nRéponse générée :\n{answer[:1500]}")
+               f"Données utilisées :\n{context[:JUDGE_CONTEXT_CHARS]}\n\nRéponse générée :\n{answer[:JUDGE_ANSWER_CHARS]}")
     try:
         if claude_available():
             response = call_claude(model=CLAUDE_JUDGE_MODEL, system=_JUDGE_SYSTEM,

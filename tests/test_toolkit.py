@@ -64,3 +64,15 @@ def test_rag_returns_every_station_cited_in_the_question():
     found, trace = hybrid_search("La station Bastille est-elle souvent vide le matin le week-end ?", docs)
     assert {d["metadata"]["station"] for d in found} == set(names[:3])
     assert trace["techniques_used"] == ["Station citée"]
+
+
+def test_station_info_gives_the_moment_and_the_other_matches():
+    """« République » désigne plusieurs stations : l'outil le dit, et donne l'heure et le créneau réels."""
+    from src.ai.tools import get_station_info_tool
+
+    rows = [{**SNAPSHOT.iloc[0].to_dict(), "station_id": str(i), "name": n}
+            for i, n in enumerate(["ANDRÉ KARMAN - RÉPUBLIQUE", "OBERKAMPF - RÉPUBLIQUE", "RÉPUBLIQUE"])]
+    info = get_station_info_tool("republique", pd.DataFrame(rows))
+    assert info["station"] == "RÉPUBLIQUE"   # nom exact d'abord
+    assert set(info["autres_stations_correspondantes"]) == {"ANDRÉ KARMAN - RÉPUBLIQUE", "OBERKAMPF - RÉPUBLIQUE"}
+    assert set(info["moment"]) == {"heure_paris", "jour", "type_de_jour", "periode"}

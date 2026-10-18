@@ -18,21 +18,38 @@ PARIS_TZ = pytz.timezone("Europe/Paris")
 MAX_LISTED_STATIONS = 15
 
 
+def current_moment() -> dict:
+    """Heure de Paris et créneau, avec les mêmes périodes que les profils historiques (dbt)."""
+    now = datetime.now(PARIS_TZ)
+    period = ("matin" if 6 <= now.hour < 12 else "après-midi" if now.hour < 18
+              else "soir" if now.hour < 22 else "nuit") if now.hour >= 6 else "nuit"
+    days = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+    return {"heure_paris": now.strftime("%H:%M"), "jour": days[now.weekday()],
+            "type_de_jour": "week-end" if now.weekday() >= 5 else "semaine", "periode": period}
+
+
 def get_station_info_tool(station_name: str, df: pd.DataFrame) -> dict:
     if df is None or df.empty:
         return {"error": "Données temps réel non disponibles."}
 
-    from src.data.filters import search_stations
+    from src.data.filters import normalize_name, search_stations, stations_in_question
 
     # Recherche insensible aux accents et à l'ordre des mots (« republique » → « RÉPUBLIQUE »)
     results = search_stations(df, station_name)
-
+    if results.empty:
+        cited = stations_in_question(station_name, df["name"].dropna().unique())
+        results = df[df["name"].isin(cited)]
     if results.empty:
         return {"error": f"Station '{station_name}' non trouvée."}
 
-    row = results.iloc[0]
+    # Nom exact d'abord, sinon le nom le plus court (le plus proche de la recherche)
+    results = results.iloc[results["name"].str.len().argsort()]
+    exact = results[results["name"].map(normalize_name) == normalize_name(station_name)]
+    row = (exact if not exact.empty else results).iloc[0]
+    others = [n for n in results["name"].tolist() if n != row["name"]]
 
     return {
+        "moment": current_moment(),
         "station": row["name"],
         "velos_disponibles": int(row["numbikesavailable"]),
         "velos_electriques": int(row["ebike"]),
@@ -46,6 +63,9 @@ def get_station_info_tool(station_name: str, df: pd.DataFrame) -> dict:
             if row["is_full"]
             else "disponible"
         ),
+        **({"autres_stations_correspondantes": others[:MAX_LISTED_STATIONS], "nombre_correspondances": len(results),
+            "remarque": "Plusieurs stations correspondent : préciser le nom pour en choisir une autre."}
+           if others else {}),
     }
 
 

@@ -426,16 +426,11 @@ Question : {question}
             for d in final_docs
         ]
 
-        # Verification pertinence
-        sources_str = "\n".join([
-            f"- {d['metadata']['station']} ({d['metadata']['run_at']}): {d['text'][:200]}"
-            for d in final_docs
-        ])
-
+        # Vérification de la pertinence, sur les mêmes documents que ceux donnés au LLM
         relevance_score, relevance_explanation = verify_relevance(
             question=question,
             answer=answer,
-            context=sources_str,
+            context=context,
             evaluator_name="système RAG Vélib",
         )
 
