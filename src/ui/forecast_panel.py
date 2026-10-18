@@ -175,8 +175,9 @@ def render_forecast() -> None:
     if predictions is None:
         status = _status()["status"]
         if status.get("status") == "skipped":
-            st.info(f"Modèles pas encore entraînés : {status.get('reason')}. Ils le seront automatiquement "
-                    "dès que la collecte horaire aura assez d'historique (chaque jour de la semaine plusieurs fois).")
+            st.info(f"Modèles pas encore entraînés : {status.get('reason')}.")
+        elif status.get("status") == "test":
+            st.info("Dernier entraînement : un test, ses modèles ne sont pas publiés dans l'application.")
         elif status.get("status") == "trained" and not status.get("promoted"):
             st.info("Les derniers modèles entraînés ne battent pas les baselines : ils n'ont pas été publiés.")
         else:

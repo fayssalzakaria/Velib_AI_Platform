@@ -178,3 +178,25 @@ def test_psi_detects_a_shift():
     reference = reference_distribution(pd.DataFrame({"x": rng.normal(0, 1, 5000)}), ["x"])["x"]
     assert psi(reference, rng.normal(0, 1, 2000)) < 0.1      # même distribution : stable
     assert psi(reference, rng.normal(1.5, 1, 2000)) > 0.25   # moyenne décalée : dérive
+
+
+def test_test_training_is_never_served(tmp_path, monkeypatch):
+    """Entraînement de test (publish=False) : métriques enregistrées, mais l'app ne sert aucun modèle."""
+    _, history, _ = _simulated_lake(tmp_path, monkeypatch, n_stations=30, days=16, seed=2)
+    from pipeline.forecast import train_forecast
+    from src.ml.storage import model_uri, read_json
+
+    result = train_forecast(history, publish=False)
+    assert result["status"] == "test" and result["promoted"] == []
+    assert read_json(model_uri("forecast", "latest.json")) is None
+    metrics = read_json(model_uri("forecast", result["version"], "metrics.json"))
+    assert metrics["published"] is False and metrics["beats_baselines"]
+
+
+def test_min_days_can_be_lowered(tmp_path, monkeypatch, silver):
+    monkeypatch.setenv("LAKE_ROOT", str(tmp_path))
+    from pipeline.forecast import train_forecast
+
+    short = silver[silver["date"] <= sorted(silver["date"].unique())[1]]  # deux jours
+    assert train_forecast(short)["status"] == "skipped"
+    assert train_forecast(short, min_days=2, publish=False)["status"] != "skipped"

@@ -190,7 +190,12 @@ def _train_bikes(train, valid, test, features):
 
 
 def train_forecast(silver: pd.DataFrame | None = None, weather: pd.DataFrame | None = None,
-                   school: pd.DataFrame | None = None) -> dict:
+                   school: pd.DataFrame | None = None, min_days: int | None = None, publish: bool = True) -> dict:
+    """
+    Entraîne les 3 familles de modèles, lancé à la main (Airflow ou ligne de commande).
+    min_days : historique minimal exigé (MIN_DAYS par défaut).
+    publish=False : entraînement de test, les métriques sont enregistrées mais l'app ne sert pas ces modèles.
+    """
     from pipeline.external import read_school_holidays, read_weather
     from src.ml.features import FEATURES, HORIZONS, TARGETS, training_frame
     from src.ml.storage import model_uri, write_json, write_text
@@ -198,10 +203,11 @@ def train_forecast(silver: pd.DataFrame | None = None, weather: pd.DataFrame | N
     silver = _read_silver() if silver is None else silver
     weather = read_weather() if weather is None else weather
     school = read_school_holidays() if school is None else school
+    min_days = MIN_DAYS if min_days is None else min_days
     days = silver["date"].nunique() if "date" in silver else silver["ingested_at"].dt.date.nunique()
-    if days < MIN_DAYS:
+    if days < min_days:
         result = {"status": "skipped", "days": int(days),
-                  "reason": f"{days} jour{'s' if days > 1 else ''} d'historique sur {MIN_DAYS} requis"}
+                  "reason": f"{days} jour{'s' if days > 1 else ''} d'historique sur {min_days} requis"}
         logger.info(f"Modèles non entraînés : {result['reason']}")
         write_json(model_uri(MODEL_NAME, "status.json"), {**result, "checked_at": datetime.now(timezone.utc)})
         return result
@@ -236,7 +242,9 @@ def train_forecast(silver: pd.DataFrame | None = None, weather: pd.DataFrame | N
             family: {k: v for k, v in result.items() if k != "models"} | {"files": sorted(result["models"])}
             for family, result in results.items()
         },
-        "promoted": [family for family, result in results.items() if result["promoted"]],
+        "promoted": [family for family, result in results.items() if result["promoted"]] if publish else [],
+        "beats_baselines": [family for family, result in results.items() if result["promoted"]],
+        "published": publish,
         "feature_importance_gain": dict(sorted(zip(FEATURES, importance.round(1).tolist()), key=lambda i: -i[1])),
         "external_data": {"weather": weather is not None, "school_holidays": school is not None},
         "reference_distribution": reference_distribution(train, FEATURES),
@@ -244,11 +252,12 @@ def train_forecast(silver: pd.DataFrame | None = None, weather: pd.DataFrame | N
     write_json(model_uri(MODEL_NAME, version, "metrics.json"), metrics)
     if metrics["promoted"]:
         write_json(model_uri(MODEL_NAME, "latest.json"), metrics)
-    write_json(model_uri(MODEL_NAME, "status.json"), {"status": "trained", "version": version,
+    status = "trained" if publish else "test"
+    write_json(model_uri(MODEL_NAME, "status.json"), {"status": status, "version": version,
                                                       "promoted": metrics["promoted"],
                                                       "checked_at": datetime.now(timezone.utc)})
 
     summary = {family: {"score": r["evaluation"]["model"]["all"].get("auc", r["evaluation"]["model"]["all"].get("mae")),
-                        "publié": r["promoted"]} for family, r in results.items()}
-    logger.info(f"Modèles {version} : {summary}")
-    return {"status": "trained", "version": version, "promoted": metrics["promoted"], "summary": summary}
+                        "bat les baselines": r["promoted"]} for family, r in results.items()}
+    logger.info(f"Modèles {version} ({'publiés' if publish else 'test, non publiés'}) : {summary}")
+    return {"status": status, "version": version, "promoted": metrics["promoted"], "summary": summary}
