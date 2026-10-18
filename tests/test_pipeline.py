@@ -220,3 +220,19 @@ def test_router_reports_rule_and_matched_keywords():
 
     route = classify_question_rule_based("salut")
     assert route["intent"] == "general" and route["rule"] == "aucune" and route["matched"] == []
+
+
+def test_incomplete_api_response_is_retried(monkeypatch):
+    """Stations sans code ni nom (API en cours de mise à jour) : on réessaie au lieu d'écrire un snapshot vide."""
+    import pipeline.extract as extract
+
+    good = [{"stationcode": str(i), "name": f"S{i}"} for i in range(10)]
+    responses = iter([[{"duedate": "x"}] * 10, good])
+
+    class Response:
+        def __init__(self, data): self.data = data
+        def raise_for_status(self): pass
+        def json(self): return self.data
+
+    monkeypatch.setattr(extract.requests, "get", lambda *a, **k: Response(next(responses)))
+    assert extract.fetch_raw(wait_seconds=0) == good
