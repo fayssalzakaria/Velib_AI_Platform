@@ -39,3 +39,16 @@ def test_profile_retriever_wraps_hybrid_search(monkeypatch):
     found = ProfileRetriever(documents=docs, k=3).invoke("Bastille le matin ?")
     assert found[0].page_content.startswith("Station BASTILLE")
     assert found[0].metadata["techniques"] == ["BM25", "RRF"]
+
+
+def test_assistant_finds_the_station_in_the_question():
+    from src.ai.assistant import _extract_possible_station
+
+    names = ["STATION PARIS BASKETBALL - NEY", "BROCHANT - CLICHY", "BERTHIER - PORTE DE CLICHY",
+             "PLACE D'ITALIE - AURIOL", "RÉPUBLIQUE - TEMPLE"] + [f"PLACE {i} - RUE {i}" for i in range(60)]
+    df = pd.DataFrame({"name": names})
+    assert _extract_possible_station("état de la station clichy", df) == "BROCHANT - CLICHY"
+    assert _extract_possible_station("station porte de clichy", df) == "BERTHIER - PORTE DE CLICHY"
+    assert _extract_possible_station("La station republique sera vide à 18h ?", df) == "RÉPUBLIQUE - TEMPLE"
+    assert _extract_possible_station("Combien de vélos dans Paris ?", df) is None
+    assert _extract_possible_station("Quelles stations place ?", df) is None   # mot trop courant

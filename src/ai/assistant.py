@@ -9,6 +9,7 @@ L'assistant route automatiquement les questions vers :
 - rapport
 """
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -19,6 +20,7 @@ from llm_client import (
 )
 from src.ai.prompts import FINAL_SYNTHESIS_PROMPT
 from src.ai.router import classify_question
+from src.data.filters import normalize_name
 from src.ai.tools import (
     detect_anomalies_tool,
     forecast_tool,
@@ -52,38 +54,45 @@ class AssistantTrace:
     usage: dict = field(default_factory=dict)
 
 
+# Mots de la question qui ne désignent jamais une station
+_NOT_A_STATION = {
+    "STATION", "STATIONS", "VELO", "VELOS", "VELIB", "BORNE", "BORNES", "COMBIEN", "ETAT", "QUEL", "QUELLE",
+    "EST", "SERA", "DANS", "HEURE", "HEURES", "LIBRE", "LIBRES", "DISPO", "DISPONIBLE", "DISPONIBLES",
+    "VIDE", "VIDES", "PLEINE", "PLEINES", "ELECTRIQUE", "ELECTRIQUES", "MECANIQUE", "MECANIQUES",
+    "MAINTENANT", "ACTUELLEMENT", "AUJOURD", "HUI", "MATIN", "SOIR", "PASSE", "QUOI", "POUR", "AVEC",
+    "PARIS", "RESEAU",
+}
+# Un mot présent dans plus de stations que ça (« PLACE », « SAINT », « DES ») ne suffit pas à en désigner une
+MAX_STATIONS_PER_WORD = 40
+
+
 def _extract_possible_station(question: str, df: pd.DataFrame) -> str | None:
     """
-    Détection simple d'une station mentionnée dans la question.
-    On évite un appel LLM supplémentaire.
+    Station mentionnée dans la question, sans appel LLM, avec la même normalisation que la recherche
+    (accents, casse, ponctuation). Chaque mot de la question présent dans un nom de station rapporte
+    d'autant plus de points qu'il est rare dans le réseau : « CLICHY » pèse plus que « RUE ».
     """
     if df is None or df.empty or "name" not in df.columns:
         return None
 
-    q = question.upper()
+    words = {w for w in normalize_name(question).split() if len(w) >= 3 and w not in _NOT_A_STATION}
+    if not words:
+        return None
 
-    stations = sorted(
-        df["name"].dropna().unique().tolist(),
-        key=len,
-        reverse=True,
-    )
+    names = df["name"].dropna().unique()
+    tokens = {name: set(normalize_name(name).split()) for name in names}
+    frequency = {w: sum(w in t for t in tokens.values()) for w in words}
+    rarity = {w: math.log(len(names) / n) for w, n in frequency.items() if n}
+    if not rarity:
+        return None
 
-    for station in stations:
-        if station and station in q:
-            return station
+    distinctive = {w for w, n in frequency.items() if 0 < n <= MAX_STATIONS_PER_WORD}
+    if not distinctive:
+        return None
 
-    # fallback par mots distinctifs
-    words = [w for w in q.split() if len(w) >= 4]
-    best_station = None
-    best_score = 0
-
-    for station in stations:
-        score = sum(1 for w in words if w in station)
-        if score > best_score:
-            best_score = score
-            best_station = station
-
-    return best_station if best_score >= 1 else None
+    # à score égal, le nom le plus court (le moins de mots non demandés)
+    candidates = [name for name in names if tokens[name] & distinctive]
+    return max(candidates, key=lambda name: (sum(rarity[w] for w in tokens[name] & rarity.keys()), -len(tokens[name])))
 
 
 def _synthesize_answer(
