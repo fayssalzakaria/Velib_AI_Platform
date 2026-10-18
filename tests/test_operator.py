@@ -45,8 +45,8 @@ def test_graph_runs_specialists_and_corrects_the_plan(monkeypatch):
     """Le planificateur se trompe une fois : le vérificateur le renvoie corriger, puis valide."""
     calls = []
 
-    def fake_complex(*, system, prompt, schema, effort="high", max_tokens=16000):
-        calls.append(effort)
+    def fake_complex(*, system, prompt, schema, effort="high", max_tokens=16000, model="opus"):
+        calls.append((effort, model))
         if "specialists" in schema["properties"]:
             return {"specialists": ["temps_reel", "historique"], "horizon": 2, "raison": "test"}, "fake-opus"
         if "refusé par le vérificateur" not in prompt:
@@ -65,7 +65,7 @@ def test_graph_runs_specialists_and_corrects_the_plan(monkeypatch):
     assert streamed == trace.steps and streamed[0].startswith("Superviseur")
     assert any("Spécialiste historique" in s for s in streamed)
     assert not any("Spécialiste prévision" in s for s in streamed)   # non choisi par le superviseur
-    assert calls == ["low", "high", "high"]                           # superviseur puis 2 plans
+    assert calls == [("low", op.CLAUDE_JUDGE_MODEL), ("high", "opus"), ("high", "opus")]  # Haiku, puis 2 plans Opus
     assert trace.relevance_score == 88 and trace.models == ["fake-opus"]
 
 

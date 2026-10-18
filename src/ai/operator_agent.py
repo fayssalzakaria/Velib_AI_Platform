@@ -1,12 +1,14 @@
 """
-operator_agent.py — Agent opérateur multi-agents (LangGraph) : produit un plan de rééquilibrage vérifié.
+operator_agent.py — Agent opérateur (LangGraph, architecture superviseur) : produit un plan de rééquilibrage vérifié.
 
     superviseur ─► spécialistes en parallèle (temps réel, prévision, historique)
                 ─► planificateur ─► vérificateur ─┬─► réponse
                          ▲                         │
                          └──── corrections ◄───────┘   (2 corrections au maximum)
 
-- superviseur et planificateur : Claude Opus 5.5 via la gateway (Groq si Claude est indisponible)
+- superviseur : Claude Haiku 5.5 (choisir les spécialistes est une décision simple)
+- planificateur : Claude Opus 5.5 (raisonnement sur les stocks et les distances)
+  Les deux passent par la gateway et repassent sur Groq si Claude est indisponible.
 - spécialistes : outils métier partagés (toolkit) et modèles de prévision, sans LLM sauf le RAG
 - vérificateur : règles déterministes (stations connues, stocks, bornes libres, distances).
   Un LLM vérifié par un autre LLM peut se tromper deux fois ; une règle, non.
@@ -21,7 +23,7 @@ from typing import Annotated, Any, TypedDict
 import pandas as pd
 from langgraph.graph import END, START, StateGraph
 
-from llm_client import call_complex_json, track_usage, verify_relevance
+from llm_client import CLAUDE_JUDGE_MODEL, call_complex_json, track_usage, verify_relevance
 from src.ai.toolkit import build_toolkit, run_tool
 
 MAX_CORRECTIONS = 2
@@ -205,7 +207,7 @@ def build_graph(df: pd.DataFrame, rag_documents=None, qdrant_client=None):
 
         decision, model = call_complex_json(
             system=_SUPERVISOR_SYSTEM, prompt=f"Demande de l'opérateur : {state['question']}",
-            schema=_SUPERVISOR_SCHEMA, effort="low", max_tokens=4000,
+            schema=_SUPERVISOR_SCHEMA, effort="low", max_tokens=4000, model=CLAUDE_JUDGE_MODEL,
         )
         target = parse_time_target(state["question"])
         horizon = target.get("hours_ahead") or decision.get("horizon") or 1

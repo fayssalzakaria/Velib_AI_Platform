@@ -226,9 +226,9 @@ def _render_operator(df) -> None:
     engine = (f"Claude Opus 5.5 (dépense Claude ce mois-ci : {claude_spend_this_month():.2f} $ / "
               f"{CLAUDE_MONTHLY_BUDGET_USD:.0f} $)" if claude_available() else "Groq (Claude non configuré ou budget atteint)")
     st.caption(
-        "Système **multi-agents (LangGraph)** : un superviseur choisit les spécialistes (temps réel, prévision, "
-        "historique), un planificateur propose des déplacements de vélos, un vérificateur contrôle chaque chiffre "
-        f"et renvoie corriger si besoin. Moteur : {engine}."
+        "Graphe **LangGraph** de type superviseur : un superviseur IA choisit les spécialistes outillés (temps réel, "
+        "prévision, historique), un planificateur IA propose des déplacements de vélos, un vérificateur (règles, sans IA) "
+        f"contrôle chaque chiffre et renvoie corriger si besoin. Planificateur : {engine}."
     )
     history = st.session_state.setdefault("operator_history", [])
     for question, answer, trace in history:
@@ -245,7 +245,7 @@ def _render_operator(df) -> None:
         return
     question = st.chat_input("Ex : Que faut-il rééquilibrer dans les 2 prochaines heures ?", key="operator_input")
     if question:
-        with st.status("Agents au travail…", expanded=True) as status:
+        with st.status("Analyse en cours…", expanded=True) as status:
             answer, trace = run_operator(question, df, _rag_documents(), _get_qdrant_client_cached(),
                                          on_step=lambda step: status.write(step))
             status.update(label="Plan prêt", state="complete")
@@ -385,7 +385,7 @@ def render_ai_tabs() -> None:
     tab_assistant, tab_agent, tab_operator, tab_metrics = st.tabs([
         "💬 Assistant (routage par règles)",
         "🤖 Agent (le LLM choisit ses outils)",
-        "🧭 Opérateur (multi-agents)",
+        "🧭 Opérateur (superviseur LangGraph)",
         "📊 Qualité & consommation",
     ])
     with tab_assistant:

@@ -3,8 +3,9 @@ llm_client.py — Gateway LLM : un seul point d'entrée pour Groq et Claude.
 
 Routage par tâche :
 - Groq (gpt-oss-120b) : routage, HyDE, synthèses, RAG, agent simple — rapide et quasi gratuit
-- Claude Haiku 5.5    : juge de pertinence — un autre modèle que celui qui répond (moins de biais)
-- Claude Opus 5.5     : agent opérateur et escalade des réponses faibles — raisonnement complexe
+- Claude Haiku 5.5    : juge de pertinence (un autre modèle que celui qui répond, moins de biais)
+                        et superviseur de l'agent opérateur (choix simple, peu coûteux)
+- Claude Opus 5.5     : planificateur de l'agent opérateur et escalade des réponses faibles
 
 La gateway centralise aussi la mesure (appels, tokens, latence, coût par modèle), le plafond
 de dépense Claude, le prompt caching Claude et les erreurs explicites.
@@ -419,16 +420,16 @@ def verify_relevance(
 # ---------------------------------------------------------------- tâches complexes
 
 def call_complex_json(*, system: str, prompt: str, schema: dict[str, Any], effort: str = "high",
-                      max_tokens: int = 16000) -> tuple[dict[str, Any], str]:
+                      max_tokens: int = 16000, model: str = CLAUDE_COMPLEX_MODEL) -> tuple[dict[str, Any], str]:
     """
-    Tâche complexe à sortie JSON : Claude Opus 5.5 (sortie structurée garantie) si disponible,
+    Tâche à sortie JSON : Claude (Opus 5.5 par défaut, sortie structurée garantie) si disponible,
     sinon Groq avec le schéma décrit dans le prompt. Renvoie (données, modèle utilisé).
     """
     if claude_available():
-        response = call_claude(model=CLAUDE_COMPLEX_MODEL, system=system,
+        response = call_claude(model=model, system=system,
                                messages=[{"role": "user", "content": prompt}],
                                effort=effort, output_schema=schema, max_tokens=max_tokens)
-        return json.loads(claude_text(response)), CLAUDE_COMPLEX_MODEL
+        return json.loads(claude_text(response)), model
     data, _ = call_llm_json(
         f"{prompt}\n\nRéponds UNIQUEMENT avec un JSON conforme à ce schéma :\n{json.dumps(schema, ensure_ascii=False)}",
         system_prompt=system, max_tokens=4000, temperature=0.1, timeout=60,
