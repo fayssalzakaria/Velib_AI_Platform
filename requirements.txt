@@ -16,6 +16,5 @@ uvicorn
 anthropic==1.15.0
 langchain-core==1.6.11
 langgraph==1.2.15
-mcp==2.3.0
 langchain-groq
 pydantic

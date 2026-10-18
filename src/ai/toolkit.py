@@ -1,8 +1,8 @@
 """
 toolkit.py — Les outils métier, définis une seule fois (outils LangChain).
 
-Utilisés par l'agent simple (Groq, format OpenAI), l'agent opérateur (Claude, format Anthropic)
-et le serveur MCP. Chaque outil renvoie du JSON ; la logique métier vit dans tools.py.
+Utilisés par l'agent simple (Groq, format OpenAI), l'agent opérateur (Claude, format Anthropic).
+Chaque outil renvoie du JSON ; la logique métier vit dans tools.py.
 """
 import json
 

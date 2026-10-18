@@ -2,8 +2,7 @@
 agent.py — Agent simple : le LLM (Groq) choisit lui-même ses outils par function calling,
 en plusieurs tours si besoin (par exemple l'état actuel d'une station, puis son historique).
 
-Les outils viennent de toolkit.py (définis une seule fois, partagés avec l'agent opérateur
-et le serveur MCP).
+Les outils viennent de toolkit.py (définis une seule fois, partagés avec l'agent opérateur).
 """
 import json
 import os
