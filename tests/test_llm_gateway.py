@@ -120,3 +120,17 @@ def test_escalation_keeps_groq_answer_if_claude_is_not_better(monkeypatch, fake_
     assistant, df = _assistant_with(monkeypatch, [50, 30])
     answer, trace = assistant.run_unified_assistant("Y a-t-il des anomalies ?", df)
     assert answer == "réponse Groq" and trace.escalated and trace.relevance_score == 50
+
+
+def test_weak_history_answer_is_escalated_too(monkeypatch, fake_claude):
+    """Questions d'habitudes (RAG) : même cascade que les autres intentions."""
+    import pandas as pd
+    import src.ai.assistant as assistant
+
+    fake_claude(text="réponse Claude")
+    rag_trace = {"relevance_score": 40, "relevance_explanation": "contradictoire", "context": "[Source 1] profil"}
+    monkeypatch.setattr(assistant, "search_history_rag_tool", lambda q, docs: ("réponse Groq", rag_trace))
+    monkeypatch.setattr(assistant, "_evaluate_unified_answer", lambda **k: (80, "ok"))
+    answer, trace = assistant.run_unified_assistant("Bastille est-elle souvent vide ?", pd.DataFrame(),
+                                                    rag_documents=[{}])
+    assert answer == "réponse Claude" and trace.escalated and trace.relevance_score == 80

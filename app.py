@@ -1,6 +1,7 @@
 import streamlit as st
 
 from config import MODE_HISTORY
+from src.ai.embeddings import warm_up as warm_up_embeddings
 from src.data.filters import apply_filters
 from src.ui.ai_panel import render_ai_tabs
 from src.ui.forecast_panel import render_forecast
@@ -24,6 +25,9 @@ st.set_page_config(
 )
 
 st.title("Vélib' Dashboard Paris")
+
+# Modèle d'embeddings du RAG chargé en arrière-plan pendant que l'utilisateur regarde la page
+warm_up_embeddings()
 
 handle_snapshot_refresh()
 mode, filters, days = render_sidebar()

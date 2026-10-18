@@ -52,3 +52,15 @@ def test_assistant_finds_the_station_in_the_question():
     assert _extract_possible_station("La station republique sera vide à 18h ?", df) == "RÉPUBLIQUE - TEMPLE"
     assert _extract_possible_station("Combien de vélos dans Paris ?", df) is None
     assert _extract_possible_station("Quelles stations place ?", df) is None   # mot trop courant
+
+
+def test_rag_returns_every_station_cited_in_the_question():
+    """« Bastille » : les profils de toutes les stations Bastille, sans passer par MMR qui en écarterait."""
+    from src.ai.rag import hybrid_search
+
+    names = ["PLACE DE LA BASTILLE - BOURDON", "BASTILLE - QUAI DE LA RAPÉE", "RICHARD LENOIR - PLACE DE LA BASTILLE",
+             "BASILIQUE", "MAIRIE"] + [f"PLACE {i} - RUE {i}" for i in range(60)]
+    docs = [{"text": f"Station {n}", "metadata": {"station": n, "run_at": "r"}} for n in names]
+    found, trace = hybrid_search("La station Bastille est-elle souvent vide le matin le week-end ?", docs)
+    assert {d["metadata"]["station"] for d in found} == set(names[:3])
+    assert trace["techniques_used"] == ["Station citée"]

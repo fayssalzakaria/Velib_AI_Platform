@@ -254,22 +254,16 @@ def hybrid_search(
 
     if not documents:
         return [], trace
-    # Fast path — cherche le nom de station directement dans les documents
-    question_upper = question.upper()
-    station_docs = []
-    for doc in documents:
-        station = doc["metadata"].get("station", "")
-        if station and station in question_upper:
-            station_docs.append(doc)
+    # Station(s) citée(s) dans la question (« Bastille » → les 5 stations Bastille) : leurs profils
+    # sont exactement les documents utiles. La recherche hybride (et MMR, qui écarterait des
+    # profils trop semblables) sert aux questions sans station précise.
+    from src.data.filters import stations_in_question
 
-    if station_docs:
-        # Station trouvee par nom exact — trie par date et retourne
-        station_docs = sorted(
-            station_docs,
-            key=lambda d: d["metadata"].get("run_at", ""),
-            reverse=True
-        )[:top_k]
-        trace["techniques_used"] = ["Nom exact"]
+    by_station = {d["metadata"].get("station", ""): d for d in documents}
+    cited = stations_in_question(question, by_station)
+    if cited:
+        station_docs = [by_station[name] for name in cited[:top_k]]
+        trace["techniques_used"] = ["Station citée"]
         trace["final_docs"] = [f"{d['metadata']['station']} ({d['metadata']['run_at']})" for d in station_docs]
         return station_docs, trace
 
@@ -405,6 +399,10 @@ INSTRUCTIONS :
 - Pour chaque affirmation, cite la source entre crochets [Source N]
 - Si une information n'est pas dans les donnees, dis-le clairement
 - Ne fais pas d'hypotheses sur des donnees non fournies
+- Commence par une reponse directe et coherente avec la suite : si les donnees ne couvrent pas
+  la periode demandee, dis-le des la premiere phrase (ni « oui » ni « non »), puis donne ce que
+  les donnees montrent sur les periodes disponibles
+- Si plusieurs stations correspondent (par exemple plusieurs stations « Bastille »), reponds pour chacune
 
 Donnees historiques :
 {context}
@@ -421,6 +419,7 @@ Question : {question}
         )
 
         search_trace["tokens"] = tokens
+        search_trace["context"] = context
 
         search_trace["sources_used"] = [
             f"{d['metadata']['station']} — {d['metadata']['run_at']}"

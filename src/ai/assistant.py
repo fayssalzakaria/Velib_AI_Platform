@@ -9,7 +9,6 @@ L'assistant route automatiquement les questions vers :
 - rapport
 """
 
-import math
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -20,7 +19,7 @@ from llm_client import (
 )
 from src.ai.prompts import FINAL_SYNTHESIS_PROMPT
 from src.ai.router import classify_question
-from src.data.filters import normalize_name
+from src.data.filters import stations_in_question
 from src.ai.tools import (
     detect_anomalies_tool,
     forecast_tool,
@@ -53,45 +52,12 @@ class AssistantTrace:
     usage: dict = field(default_factory=dict)
 
 
-# Mots de la question qui ne désignent jamais une station
-_NOT_A_STATION = {
-    "STATION", "STATIONS", "VELO", "VELOS", "VELIB", "BORNE", "BORNES", "COMBIEN", "ETAT", "QUEL", "QUELLE",
-    "EST", "SERA", "DANS", "HEURE", "HEURES", "LIBRE", "LIBRES", "DISPO", "DISPONIBLE", "DISPONIBLES",
-    "VIDE", "VIDES", "PLEINE", "PLEINES", "ELECTRIQUE", "ELECTRIQUES", "MECANIQUE", "MECANIQUES",
-    "MAINTENANT", "ACTUELLEMENT", "AUJOURD", "HUI", "MATIN", "SOIR", "PASSE", "QUOI", "POUR", "AVEC",
-    "PARIS", "RESEAU",
-}
-# Un mot présent dans plus de stations que ça (« PLACE », « SAINT », « DES ») ne suffit pas à en désigner une
-MAX_STATIONS_PER_WORD = 40
-
-
 def _extract_possible_station(question: str, df: pd.DataFrame) -> str | None:
-    """
-    Station mentionnée dans la question, sans appel LLM, avec la même normalisation que la recherche
-    (accents, casse, ponctuation). Chaque mot de la question présent dans un nom de station rapporte
-    d'autant plus de points qu'il est rare dans le réseau : « CLICHY » pèse plus que « RUE ».
-    """
+    """Station la plus probable citée dans la question (sans appel LLM)."""
     if df is None or df.empty or "name" not in df.columns:
         return None
-
-    words = {w for w in normalize_name(question).split() if len(w) >= 3 and w not in _NOT_A_STATION}
-    if not words:
-        return None
-
-    names = df["name"].dropna().unique()
-    tokens = {name: set(normalize_name(name).split()) for name in names}
-    frequency = {w: sum(w in t for t in tokens.values()) for w in words}
-    rarity = {w: math.log(len(names) / n) for w, n in frequency.items() if n}
-    if not rarity:
-        return None
-
-    distinctive = {w for w, n in frequency.items() if 0 < n <= MAX_STATIONS_PER_WORD}
-    if not distinctive:
-        return None
-
-    # à score égal, le nom le plus court (le moins de mots non demandés)
-    candidates = [name for name in names if tokens[name] & distinctive]
-    return max(candidates, key=lambda name: (sum(rarity[w] for w in tokens[name] & rarity.keys()), -len(tokens[name])))
+    matches = stations_in_question(question, df["name"].dropna().unique())
+    return matches[0] if matches else None
 
 
 def _synthesize_answer(
@@ -123,6 +89,25 @@ Produis la réponse finale.
 
 # En dessous de cette note du juge, la réponse de Groq est reprise par Claude Opus (cascade)
 ESCALATION_THRESHOLD = 60
+
+
+def _maybe_escalate(trace: AssistantTrace, question: str, intent: str, answer: str, tool_results_text: str) -> str:
+    """Cascade : réponse jugée faible → Claude Opus reprend avec les mêmes données ; on garde la meilleure."""
+    score = trace.relevance_score
+    if score is None or score >= ESCALATION_THRESHOLD or not claude_available():
+        return answer
+    better = _escalate(question, intent, tool_results_text)
+    if not better:
+        return answer
+    new_score, new_explanation = _evaluate_unified_answer(
+        question=question, answer=better, tool_results_text=tool_results_text, intent=intent)
+    trace.escalated = True
+    trace.escalation_note = f"Réponse Groq notée {score}/100 → Claude Opus : {new_score}/100"
+    if new_score >= score:
+        trace.final_answer = better
+        trace.relevance_score, trace.relevance_explanation = new_score, new_explanation
+        return better
+    return answer
 
 
 def _escalate(question: str, intent: str, tool_results_text: str) -> str | None:
@@ -241,6 +226,9 @@ def _run_assistant(
                 trace.relevance_score = score
                 trace.relevance_explanation = explanation
 
+            context = rag_trace.get("context", "") if isinstance(rag_trace, dict) else ""
+            answer = _maybe_escalate(trace, question, intent, answer,
+                                     context or tool_result_to_text(tool_outputs["search_history_rag"]))
             return answer, trace
 
         elif intent == "forecast":
@@ -305,18 +293,7 @@ def _run_assistant(
         trace.relevance_score = score
         trace.relevance_explanation = explanation
 
-        # Cascade : réponse jugée faible → Claude Opus reprend ; on garde la meilleure des deux
-        if score < ESCALATION_THRESHOLD and claude_available():
-            better = _escalate(question, intent, tool_results_text)
-            if better:
-                new_score, new_explanation = _evaluate_unified_answer(
-                    question=question, answer=better, tool_results_text=tool_results_text, intent=intent)
-                trace.escalated = True
-                trace.escalation_note = f"Réponse Groq notée {score}/100 → Claude Opus : {new_score}/100"
-                if new_score >= score:
-                    answer, trace.final_answer = better, better
-                    trace.relevance_score, trace.relevance_explanation = new_score, new_explanation
-
+        answer = _maybe_escalate(trace, question, intent, answer, tool_results_text)
         return answer, trace
 
     except Exception as e:

@@ -9,6 +9,7 @@ Les modèles E5 attendent un préfixe : « query: » pour la question,
 « passage: » pour les documents indexés.
 """
 import os
+import threading
 from functools import lru_cache
 
 import numpy as np
@@ -20,10 +21,29 @@ def _uses_e5_prefixes() -> bool:
     return "e5" in EMBEDDING_MODEL.lower()
 
 
+_lock = threading.Lock()
+
+
 @lru_cache(maxsize=1)
-def _model():
+def _load():
     from sentence_transformers import SentenceTransformer
     return SentenceTransformer(EMBEDDING_MODEL)
+
+
+def _model():
+    with _lock:  # un seul chargement, même si le préchargement est en cours
+        return _load()
+
+
+def warm_up() -> None:
+    """
+    Charge le modèle en arrière-plan (10 à 40 s à froid : import + poids) pour que la première
+    question de l'utilisateur ne paie pas ce temps. Sans effet si c'est déjà fait.
+    """
+    if _load.cache_info().currsize or getattr(warm_up, "started", False):
+        return
+    warm_up.started = True
+    threading.Thread(target=_model, daemon=True, name="embeddings-warm-up").start()
 
 
 def embed_passages(texts: list[str]) -> np.ndarray:
