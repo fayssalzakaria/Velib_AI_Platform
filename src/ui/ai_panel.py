@@ -12,7 +12,7 @@ import streamlit as st
 from src.ai.agent import run_agent
 from src.ai.assistant import run_unified_assistant
 from src.ai.nlp_utils import detect_time_expression, extract_keywords, normalize_text
-from src.ai.vector_store import build_qdrant_index, semantic_search
+from src.ai.vector_store import build_qdrant_index
 
 ASSISTANT, AGENT, OPERATOR = "Assistant", "Agent", "Opérateur"
 # Protège les crédits Claude d'une app publique : nombre de plans opérateur par session
@@ -145,12 +145,10 @@ def _render_assistant(df) -> None:
     )
     if question:
         with st.spinner("Assistant en cours..."):
-            qdrant_docs = semantic_search(question, qdrant_client, n_results=10) if qdrant_client else []
             answer, trace = run_unified_assistant(
                 question, df,
                 qdrant_client=qdrant_client,
                 rag_documents=rag_documents,
-                qdrant_docs=qdrant_docs,
             )
         history.append((question, answer, trace))
         _record(ASSISTANT, question, answer, trace)

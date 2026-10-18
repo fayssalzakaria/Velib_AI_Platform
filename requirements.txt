@@ -11,10 +11,7 @@ holidays==0.106
 sentence-transformers
 qdrant-client
 reportlab
-fastapi
-uvicorn
 anthropic==1.15.0
 langchain-core==1.6.11
 langgraph==1.2.15
-langchain-groq
 pydantic

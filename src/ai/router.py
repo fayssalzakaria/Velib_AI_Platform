@@ -2,8 +2,6 @@
 router.py — Routage automatique des questions utilisateur
 """
 
-from llm_client import call_llm_json
-from src.ai.prompts import ROUTER_PROMPT
 from src.ai.nlp_utils import detect_time_expression, extract_keywords, parse_time_target
 
 KEYWORDS_REALTIME = [
@@ -163,56 +161,6 @@ def classify_question_rule_based(question: str) -> dict:
     )
 
 
-def classify_question(question: str, use_llm: bool = False) -> dict:
-    """
-    Route la question vers une intention.
-
-    Par défaut, utilise les règles pour éviter un appel LLM inutile.
-    Si use_llm=True, demande une classification au modèle.
-    """
-    rule_result = classify_question_rule_based(question)
-
-    if not use_llm:
-        return rule_result
-
-    try:
-        prompt = f"""
-Question utilisateur :
-{question}
-"""
-
-        data, _ = call_llm_json(
-            prompt,
-            system_prompt=ROUTER_PROMPT,
-            max_tokens=150,
-            temperature=0.1,
-            timeout=15,
-        )
-
-        intent = data.get("intent", rule_result["intent"])
-        confidence = float(data.get("confidence") or 0.0)
-        reason = data.get("reason", rule_result["reason"])
-
-        valid_intents = {
-            "realtime",
-            "anomaly",
-            "historical",
-            "semantic",
-            "report",
-            "forecast",
-            "general",
-        }
-
-        if intent not in valid_intents:
-            return rule_result
-
-        return {
-            "intent": intent,
-            "rule": "routeur LLM",
-            "matched": [],
-            "confidence": max(0.0, min(1.0, confidence)),
-            "reason": reason,
-        }
-
-    except Exception:
-        return rule_result
+def classify_question(question: str) -> dict:
+    """Route la question vers une intention, par règles : sans appel LLM."""
+    return classify_question_rule_based(question)

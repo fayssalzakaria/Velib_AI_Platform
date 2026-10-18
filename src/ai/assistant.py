@@ -28,7 +28,6 @@ from src.ai.tools import (
     get_network_stats_tool,
     get_station_info_tool,
     search_history_rag_tool,
-    semantic_search_tool,
     tool_result_to_text,
 )
 
@@ -147,8 +146,6 @@ def run_unified_assistant(
     *,
     qdrant_client=None,
     rag_documents=None,
-    qdrant_docs=None,
-    use_llm_router: bool = False,
 ) -> tuple[str, AssistantTrace]:
     """
     Point d'entrée de l'assistant : routage décidé par le code, puis outils, puis synthèse LLM.
@@ -160,8 +157,6 @@ def run_unified_assistant(
             question, df,
             qdrant_client=qdrant_client,
             rag_documents=rag_documents,
-            qdrant_docs=qdrant_docs,
-            use_llm_router=use_llm_router,
         )
     trace.latency_s = round(time.perf_counter() - started, 2)
     trace.usage = usage.as_dict()
@@ -179,12 +174,10 @@ def _run_assistant(
     *,
     qdrant_client=None,
     rag_documents=None,
-    qdrant_docs=None,
-    use_llm_router: bool = False,
 ) -> tuple[str, AssistantTrace]:
     trace = AssistantTrace(question=question)
 
-    routing = classify_question(question, use_llm=use_llm_router)
+    routing = classify_question(question)
     intent = routing.get("intent", "general")
 
     trace.intent = intent
@@ -217,12 +210,7 @@ def _run_assistant(
             tool_outputs["get_network_stats"] = stats
 
         elif intent == "historical":
-            answer, rag_trace = search_history_rag_tool(
-                question,
-                rag_documents,
-                qdrant_client=qdrant_client,
-                qdrant_docs=qdrant_docs,
-            )
+            answer, rag_trace = search_history_rag_tool(question, rag_documents)
 
             trace.tools_used.append("search_history_rag")
             tool_outputs["search_history_rag"] = {
@@ -254,16 +242,6 @@ def _run_assistant(
                 trace.relevance_explanation = explanation
 
             return answer, trace
-
-        elif intent == "semantic":
-            semantic_result = semantic_search_tool(
-                question,
-                qdrant_client,
-                n_results=8,
-            )
-
-            trace.tools_used.append("semantic_search")
-            tool_outputs["semantic_search"] = semantic_result
 
         elif intent == "forecast":
             from src.ai.nlp_utils import parse_time_target

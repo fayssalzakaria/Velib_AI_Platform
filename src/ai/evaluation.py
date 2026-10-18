@@ -15,7 +15,7 @@ import pandas as pd
 from src.data.filters import normalize_name
 
 # Les deux systèmes nomment différemment l'outil d'historique
-_TOOL_ALIASES = {"search_history_rag": "search_history", "semantic_search": "search_history"}
+_TOOL_ALIASES = {"search_history_rag": "search_history"}
 
 
 @dataclass(frozen=True)

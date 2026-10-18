@@ -8,7 +8,7 @@ from datetime import datetime
 import pandas as pd
 import pytz
 
-from src.ai.rag import ask_rag_with_qdrant_context
+from src.ai.rag import ask_rag
 from src.ai.vector_store import semantic_search
 from src.reports.report_generator import generate_pdf_report
 
@@ -130,21 +130,14 @@ def detect_anomalies_tool(df: pd.DataFrame) -> dict:
     }
 
 
-def search_history_rag_tool(
-    question: str,
-    documents,
-    qdrant_client=None,
-    qdrant_docs=None,
-) -> tuple[str, dict]:
-    """
-    Utilise le moteur RAG historique existant.
-    """
-    qdrant_docs = qdrant_docs or []
-
-    return ask_rag_with_qdrant_context(
-        question,
-        documents,
-        qdrant_docs,
+def search_history_rag_tool(question: str, documents) -> tuple[str, dict]:
+    """Réponse rédigée par le RAG historique (profils des stations)."""
+    if documents:
+        return ask_rag(question, documents)
+    return (
+        "Historique indisponible : le lakehouse n'a pas encore de profils de stations "
+        "(le job quotidien dbt n'est peut-être pas encore passé).",
+        {"techniques_used": [], "relevance_score": None, "relevance_explanation": ""},
     )
 
 
@@ -165,26 +158,6 @@ def search_history_tool(query: str, rag_documents=None, qdrant_client=None, rera
     if qdrant_client is not None:
         return {"resultats": semantic_search(query, qdrant_client, n_results=5), "techniques_utilisees": ["Qdrant"]}
     return {"error": "Historique non disponible"}
-
-
-def semantic_search_tool(
-    question: str,
-    qdrant_client,
-    n_results: int = 8,
-) -> dict:
-    if qdrant_client is None:
-        return {
-            "error": "Qdrant non configuré.",
-            "documents": [],
-        }
-
-    docs = semantic_search(question, qdrant_client, n_results=n_results)
-
-    return {
-        "source": "qdrant",
-        "documents": docs,
-        "count": len(docs),
-    }
 
 
 def forecast_tool(station_name: str | None, hours_ahead: int | None = None, at_hour: int | None = None) -> dict:
