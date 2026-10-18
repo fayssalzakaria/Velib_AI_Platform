@@ -1,4 +1,4 @@
-# Vélib' Lakehouse & IA générative
+# Vélib' AI Platform — agents IA, lakehouse et ML
 
 **Airflow 3 · dbt · DuckDB · Delta Lake · AWS S3 · GitHub Actions · LightGBM · LangGraph · LangChain · Claude · Groq · RAG · Streamlit**
 
@@ -12,7 +12,7 @@ Plateforme Data & IA sur le réseau Vélib' de Paris (~1 500 stations) :
 > Le temps réel dit où sont les vélos ; l'historique dit pourquoi ils n'y sont pas.
 
 - Application : [velib-data-pipeline.streamlit.app](https://velib-data-pipeline-e8bwwhyt8nevmwfcbfq5sa.streamlit.app/)
-- Démo vidéo : [Video_app_velib.mp4](Video_app_velib.mp4)
+- 🎬 **Vidéo de présentation** : [Video_app_velib.mp4](Video_app_velib.mp4) (temps réel, historique, assistant, agent, agent opérateur multi-agents, métriques de qualité et de coût)
 
 ---
 
@@ -30,7 +30,7 @@ La v2 garde **S3 comme seul service AWS** et déplace le calcul vers des outils 
 | Transformations | pandas dans la Lambda | **dbt-duckdb** + tests qualité |
 | Accès AWS | clés longues | **OIDC** (GitHub), IAM à privilèges minimaux |
 
-Le code de la v1 reste consultable via le tag git [`v1-aws`](https://github.com/fayssalzakaria/Agentic-Velib-AI-on-AWS/tree/v1-aws).
+Le code de la v1 reste consultable via le tag git [`v1-aws`](https://github.com/fayssalzakaria/Velib_AI_Platform/tree/v1-aws).
 
 ---
 
