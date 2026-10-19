@@ -230,7 +230,7 @@ def test_incomplete_api_response_is_retried(monkeypatch):
     responses = iter([[{"duedate": "x"}] * 10, good])
 
     class Response:
-        def __init__(self, data): self.data = data
+        def __init__(self, data): self.data, self.content = data, b""
         def raise_for_status(self): pass
         def json(self): return self.data
 
