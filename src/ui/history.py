@@ -1,8 +1,8 @@
 """
-history.py — Mode Historique : statistiques sur tous les snapshots du lakehouse S3.
+history.py — Mode Historique : statistiques sur les snapshots collectés dans le lakehouse.
 
-Tout est lu dans le silver (Delta) : une ligne par snapshot pour les courbes,
-une ligne par station pour les classements et la carte.
+Tout vient du silver : une ligne par snapshot pour les courbes, une ligne par station
+pour les classements et la carte. Lectures mises en cache 10 minutes (collecte horaire).
 """
 import pandas as pd
 import plotly.express as px
@@ -78,7 +78,7 @@ def _render_trends(history: pd.DataFrame) -> None:
         fig.update_layout(title=title, height=280, margin=dict(t=40, b=10))
         col.plotly_chart(fig, use_container_width=True)
 
-    # Heures critiques : moyenne par heure de la journée sur toute la période
+    # Heures critiques : stations vides en moyenne, par heure de la journée, sur toute la période
     by_hour = (
         history.assign(heure=history["ingested_at"].dt.hour)
         .groupby("heure", as_index=False)
@@ -101,7 +101,7 @@ def _render_trends(history: pd.DataFrame) -> None:
 
 def _render_rankings(stats: pd.DataFrame, n_snapshots: int) -> None:
     st.subheader("Stations problématiques")
-    # On ignore les stations observées trop peu de fois (nouvelles ou fermées)
+    # Stations vues dans moins de la moitié des snapshots (nouvelles, fermées) : pourcentages trop fragiles
     reliable = stats[stats["n_snapshots"] >= max(1, n_snapshots // 2)]
     st.caption(f"% des snapshots où la station était vide ou pleine — {len(reliable)} stations suivies")
 
@@ -202,7 +202,7 @@ def _render_station_history(stats: pd.DataFrame, days: int | None) -> None:
     c3.metric("Pleine", f"{row['pct_full']:.0%} du temps")
     c4.metric("Vélos en moyenne", f"{row['avg_bikes']:.1f}")
 
-    hours = 24 * days if days else 24 * 3650
+    hours = 24 * days if days else 24 * 3650  # « Tout l'historique » : 10 ans suffisent
     curve = _station_history(station_name, hours)
     if curve.empty:
         return
@@ -219,7 +219,7 @@ def _render_station_history(stats: pd.DataFrame, days: int | None) -> None:
 
 
 def render_history_page(days: int | None) -> None:
-    """Page du mode Historique."""
+    """Page du mode Historique ; days=None couvre tout l'historique."""
     if not lake.is_configured():
         st.info("Lakehouse non configuré (LAKE_ROOT) : le mode Historique n'est pas disponible.")
         return

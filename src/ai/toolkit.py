@@ -1,8 +1,8 @@
 """
-toolkit.py — Les outils métier, définis une seule fois (outils LangChain).
+toolkit.py — Les outils de l'IA, définis une seule fois en outils LangChain.
 
-Utilisés par l'agent simple (Groq, format OpenAI), l'agent opérateur (Claude, format Anthropic).
-Chaque outil renvoie du JSON ; la logique métier vit dans tools.py.
+Partagés par l'agent simple (Groq, schémas OpenAI) et l'agent opérateur (Claude, schémas
+Anthropic). Chaque outil renvoie du JSON ; la logique métier reste dans tools.py.
 """
 import json
 
@@ -23,7 +23,8 @@ def _json(data) -> str:
 
 
 def build_toolkit(df, rag_documents=None, qdrant_client=None) -> list[BaseTool]:
-    """Outils liés aux données de la requête (snapshot temps réel, index RAG, Qdrant)."""
+    """Outils liés aux données de la requête (snapshot temps réel, index RAG, Qdrant en repli)."""
+    # Les docstrings ci-dessous deviennent les descriptions envoyées au LLM : les écrire pour lui.
 
     def get_station_info(station_name: str) -> str:
         """État temps réel d'une station Vélib' : vélos (mécaniques, électriques), bornes libres, état."""

@@ -1,7 +1,7 @@
 """
 profile_docs.py — Documents RAG / Qdrant construits à partir du gold dbt.
 
-Un document par station résume son comportement habituel (semaine / week-end x
+Un document par station résume son comportement habituel (semaine / week-end ×
 matin, après-midi, soir, nuit). C'est ce qui permet de répondre à
 « Bastille est-elle souvent vide le matin ? » : une tendance, pas une ligne brute.
 """
@@ -12,6 +12,7 @@ import pandas as pd
 import pytz
 
 PARIS_TZ = pytz.timezone("Europe/Paris")
+# Valeurs telles qu'écrites par dbt (sans accent) ; les libellés affichés sont dans PERIOD_LABELS
 PERIODS = ["matin", "apres-midi", "soir", "nuit"]
 PERIOD_LABELS = {"matin": "matin (6h-12h)", "apres-midi": "après-midi (12h-18h)",
                  "soir": "soir (18h-22h)", "nuit": "nuit (22h-6h)"}
@@ -38,6 +39,7 @@ def station_documents(profiles: pd.DataFrame) -> list[dict]:
 
     documents = []
     for station_id, group in profiles.groupby("station_id"):
+        # Une station peut être renommée : on garde son nom le plus récent
         name = group.sort_values("last_seen")["name"].iloc[-1]
         lines = [
             f"Station {name} — profil historique "
@@ -77,7 +79,7 @@ def station_documents(profiles: pd.DataFrame) -> list[dict]:
 
 
 def profiles_version(profiles: pd.DataFrame) -> str:
-    """Identifie une version du gold : change à chaque reconstruction dbt avec de nouvelles données."""
+    """Empreinte du gold (dernière observation + volume) : change dès que dbt ajoute des données."""
     if profiles is None or profiles.empty:
         return ""
     return f"{pd.Timestamp(profiles['last_seen'].max()).isoformat()}|{int(profiles['n_obs'].sum())}"
@@ -96,7 +98,10 @@ def documents_to_frame(documents: list[dict], vectors, version: str, model: str)
 
 
 def documents_from_frame(frame: pd.DataFrame, model: str) -> list[dict]:
-    """Relit les documents précalculés ; ignore la table si elle vient d'un autre modèle d'embeddings."""
+    """
+    Relit les documents précalculés. Si la table vient d'un autre modèle d'embeddings, on l'ignore :
+    ses vecteurs ne seraient pas comparables à ceux des questions.
+    """
     if frame is None or frame.empty or (frame["embedding_model"] != model).any():
         return []
     return [

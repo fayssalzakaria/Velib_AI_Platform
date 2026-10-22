@@ -1,5 +1,7 @@
 """
-forecast_panel.py — 🔮 Prévisions de 1 à 6 heures : stations vides, stations pleines, vélos attendus.
+forecast_panel.py — Prévisions LightGBM de 1 à 6 heures : risque de station vide ou pleine, vélos attendus.
+
+Affiche aussi la fiche des modèles publiés et leur suivi en production (lu dans le gold).
 """
 import pandas as pd
 import plotly.express as px
@@ -31,10 +33,12 @@ def _status():
 
 @st.cache_data(ttl=600, show_spinner=False)
 def _monitoring(table: str) -> pd.DataFrame:
+    """Table de suivi des modèles écrite dans le gold par le job quotidien."""
     return lake.query(f"SELECT * FROM read_parquet('{lake.lake_root()}/gold/{table}.parquet')")
 
 
 def _risk_map(frame: pd.DataFrame, risk: str, label: str) -> None:
+    """Carte des stations colorées du vert (risque nul) au rouge (risque certain)."""
     map_df = frame.dropna(subset=["lat", "lon", risk]).copy()
     map_df["color"] = [[int(29 + 134 * r), int(158 - 113 * r), int(117 - 72 * r), 200] for r in map_df[risk]]
     map_df["risk_txt"] = (map_df[risk] * 100).round(0).astype(int).astype(str) + " %"
@@ -122,7 +126,7 @@ def _model_card(model: dict) -> None:
 
 
 def _production_performance(model: dict) -> None:
-    """Les modèles face à la réalité : prévisions enregistrées chaque heure, évaluées chaque jour."""
+    """Les modèles face à la réalité : prévisions enregistrées à chaque collecte, comparées chaque jour aux observations."""
     daily = _monitoring("model_monitoring_daily")
     if daily.empty:
         st.info("Pas encore de suivi en production : les prévisions sont enregistrées à chaque collecte "
@@ -165,6 +169,10 @@ def _production_performance(model: dict) -> None:
 
 
 def render_forecast() -> None:
+    """
+    Section Prévisions. L'entraînement est lancé à la main ; un modèle n'est publié que s'il bat
+    les baselines, d'où les messages qui expliquent pourquoi rien n'est affiché.
+    """
     st.subheader("🔮 Prévisions de 1 à 6 heures")
     if not lake.is_configured():
         st.info("Prévision indisponible : lakehouse non configuré.")
@@ -196,6 +204,7 @@ def render_forecast() -> None:
     st.caption(f"Prévision pour **{target_time:%H:%M}**, à partir du snapshot de {info['snapshot_at']:%d/%m %H:%M} "
                "(collecte horaire du lakehouse).")
 
+    # Une station déjà vide (ou pleine) n'est pas une alerte : on classe celles qui risquent de le devenir
     candidates = at_h[at_h[spec["now"]] == 0]
     c1, c2, c3 = st.columns(3)
     c1.metric("Stations à risque (> 50 %)", int((candidates[spec["risk"]] > 0.5).sum()))

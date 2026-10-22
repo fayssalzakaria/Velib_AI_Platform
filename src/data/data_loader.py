@@ -1,5 +1,5 @@
 """
-data_loader.py — Snapshot temps réel depuis l'API Open Data Vélib'.
+data_loader.py — Snapshot temps réel depuis l'API Open Data Vélib' (mode Temps réel et onglets IA).
 """
 import time
 
@@ -14,7 +14,7 @@ API_V21_EXPORT = (
 
 
 def _get_with_retries(url: str, attempts: int = 3) -> list[dict]:
-    """Coupures réseau ponctuelles (connexion réinitialisée, 5xx) : on réessaie avant d'abandonner."""
+    """GET JSON avec quelques tentatives : l'API coupe parfois la connexion ou renvoie un 5xx passager."""
     for attempt in range(1, attempts + 1):
         try:
             response = requests.get(url, timeout=30)
@@ -29,8 +29,8 @@ def _get_with_retries(url: str, attempts: int = 3) -> list[dict]:
 
 def fetch_api_snapshot() -> pd.DataFrame:
     """
-    Snapshot instantané de toutes les stations (API v2.1, un seul appel), sans cache :
-    c'est le mode Temps réel, rafraîchi à la demande de l'utilisateur.
+    État de toutes les stations en un seul appel (export API v2.1).
+    Volontairement sans cache : l'utilisateur choisit quand rafraîchir.
     """
     rows = []
     for rec in _get_with_retries(API_V21_EXPORT):

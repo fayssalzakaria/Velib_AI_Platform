@@ -1,6 +1,7 @@
 """
-report_generator.py — Génère un rapport PDF avec analyse Groq
-Sans Aurora, directement depuis Streamlit
+report_generator.py — Rapport PDF du snapshot affiché (bouton « Générer rapport PDF » du mode Temps réel).
+
+Statistiques et classements calculés localement, plus un commentaire rédigé par le LLM (Groq par défaut).
 """
 import io
 import os
@@ -15,6 +16,7 @@ PARIS_TZ = pytz.timezone("Europe/Paris")
 
 
 def _call_groq(prompt: str) -> str:
+    """Analyse rédigée par le LLM ; en cas d'échec, le PDF sort quand même avec un message à la place."""
     try:
         answer, _ = call_llm_text(
             prompt,
@@ -28,10 +30,8 @@ def _call_groq(prompt: str) -> str:
 
 
 def generate_pdf_report(df: pd.DataFrame) -> bytes:
-    """
-    Génère un rapport PDF complet avec analyse Groq.
-    Retourne les bytes du PDF.
-    """
+    """Construit le PDF (analyse LLM, statistiques, deux classements) et renvoie ses octets."""
+    # Import tardif : reportlab n'est chargé que si l'utilisateur demande un rapport
     from reportlab.lib.pagesizes import A4
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -43,7 +43,6 @@ def generate_pdf_report(df: pd.DataFrame) -> bytes:
     now = datetime.now(PARIS_TZ)
     snap_str = now.strftime("%Y-%m-%d %H:%M")
 
-    # Stats
     total_stations = len(df)
     total_bikes = int(df["numbikesavailable"].sum())
     total_docks = int(df["numdocksavailable"].sum())
@@ -55,7 +54,6 @@ def generate_pdf_report(df: pd.DataFrame) -> bytes:
     top3_full = ", ".join(df.nlargest(3, "numbikesavailable")["name"].tolist())
     top3_empty = ", ".join(df.nsmallest(3, "numbikesavailable")["name"].tolist())
 
-    # Appel Groq
     prompt = f"""
 Tu es un expert en mobilite urbaine a Paris specialise dans le reseau Velib.
 Genere une analyse professionnelle en francais du reseau Velib.
@@ -83,7 +81,6 @@ Sois concis et professionnel.
 """
     ai_analysis = _call_groq(prompt)
 
-    # Génération PDF
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
@@ -113,18 +110,16 @@ Sois concis et professionnel.
 
     elements = []
 
-    # Titre
     elements.append(Paragraph("Rapport Velib — Analyse IA", style_title))
     elements.append(Paragraph(f"Genere le {snap_str}", style_subtitle))
 
-    # Analyse Groq
+    # Le LLM répond en texte libre : un paragraphe par ligne non vide
     elements.append(Paragraph("Analyse du reseau", style_heading))
     for ligne in ai_analysis.split("\n"):
         if ligne.strip():
             elements.append(Paragraph(ligne.strip(), style_body))
     elements.append(Spacer(1, 16))
 
-    # Stats globales
     elements.append(Paragraph("Statistiques globales", style_heading))
     stats = [
         ["Indicateur", "Valeur"],
@@ -150,7 +145,6 @@ Sois concis et professionnel.
     elements.append(t)
     elements.append(Spacer(1, 16))
 
-    # Top 10 mieux fournies
     elements.append(Paragraph("Top 10 stations les mieux fournies", style_heading))
     top10 = df.nlargest(10, "numbikesavailable")[["name", "numbikesavailable", "ebike"]]
     data_top = [["Station", "Velos dispo", "dont electriques"]] + [
@@ -170,7 +164,6 @@ Sois concis et professionnel.
     elements.append(t2)
     elements.append(Spacer(1, 16))
 
-    # Top 10 plus vides
     elements.append(Paragraph("Top 10 stations les plus vides", style_heading))
     empty10 = df.nsmallest(10, "numbikesavailable")[["name", "numbikesavailable", "numdocksavailable"]]
     data_empty = [["Station", "Velos dispo", "Bornes dispo"]] + [

@@ -1,12 +1,9 @@
 """
-assistant.py — Assistant IA unifié Vélib
+assistant.py — Assistant IA unifié Vélib.
 
-L'assistant route automatiquement les questions vers :
-- données temps réel
-- anomalies
-- RAG historique
-- recherche sémantique
-- rapport
+Le routeur (par règles) choisit l'intention : temps réel, anomalies, historique (RAG),
+prévision ou rapport. Le code appelle les outils correspondants, le LLM rédige la synthèse,
+le juge la note. Les questions non reconnues sont déléguées à l'agent.
 """
 
 import time
@@ -33,6 +30,8 @@ from src.ai.tools import (
 
 @dataclass
 class AssistantTrace:
+    """Tout ce qui explique une réponse : routage, outils, coût, note du juge, escalade."""
+
     question: str
     intent: str = ""
     confidence: float | None = None
@@ -65,6 +64,7 @@ def _synthesize_answer(
     intent: str,
     tool_results_text: str,
 ) -> tuple[str, dict[str, int]]:
+    """Rédaction de la réponse finale à partir des résultats d'outils déjà calculés."""
     prompt = f"""
 Question utilisateur :
 {question}
@@ -87,12 +87,15 @@ Produis la réponse finale.
     )
 
 
-# En dessous de cette note du juge, la réponse de Groq est reprise par Claude Opus (cascade)
+# En dessous de cette note du juge (sur 100), Claude Opus reprend la réponse (cascade)
 ESCALATION_THRESHOLD = 60
 
 
 def _maybe_escalate(trace: AssistantTrace, question: str, intent: str, answer: str, tool_results_text: str) -> str:
-    """Cascade : réponse jugée faible → Claude Opus reprend avec les mêmes données ; on garde la meilleure."""
+    """
+    Cascade : réponse jugée faible → Claude Opus la réécrit avec les mêmes données, le juge
+    la note à son tour et on garde la meilleure des deux (la trace est mise à jour en place).
+    """
     score = trace.relevance_score
     if score is None or score >= ESCALATION_THRESHOLD or not claude_available():
         return answer
@@ -111,7 +114,7 @@ def _maybe_escalate(trace: AssistantTrace, question: str, intent: str, answer: s
 
 
 def _escalate(question: str, intent: str, tool_results_text: str) -> str | None:
-    """Même question, mêmes résultats d'outils, rédigée par Claude Opus 5.5. None en cas d'échec."""
+    """Même question, mêmes résultats d'outils, rédigée par Claude Opus. None en cas d'échec."""
     try:
         response = call_claude(
             model=CLAUDE_COMPLEX_MODEL, system=FINAL_SYNTHESIS_PROMPT, effort="medium", max_tokens=8000,
@@ -133,7 +136,7 @@ def run_unified_assistant(
     rag_documents=None,
 ) -> tuple[str, AssistantTrace]:
     """
-    Point d'entrée de l'assistant : routage décidé par le code, puis outils, puis synthèse LLM.
+    Point d'entrée de l'assistant : routage par le code, outils, puis synthèse LLM.
     Mesure la latence et la consommation de tous les appels LLM de la question.
     """
     started = time.perf_counter()
@@ -160,6 +163,7 @@ def _run_assistant(
     qdrant_client=None,
     rag_documents=None,
 ) -> tuple[str, AssistantTrace]:
+    """Exécute une intention ; les tokens sont ensuite remplacés par le total de track_usage."""
     trace = AssistantTrace(question=question)
 
     routing = classify_question(question)
@@ -203,8 +207,8 @@ def _run_assistant(
                 "trace": rag_trace,
             }
 
-            # Si le RAG donne déjà une réponse bien formée, on la retourne directement,
-            # mais on récupère ou recalcule aussi la pertinence.
+            # Le RAG rédige déjà une réponse citée : pas de seconde synthèse. On reprend sa note
+            # de pertinence, ou on la calcule si le RAG n'a pas pu la produire.
             trace.tool_results = tool_outputs
             trace.final_answer = answer
 
@@ -226,6 +230,7 @@ def _run_assistant(
                 trace.relevance_score = score
                 trace.relevance_explanation = explanation
 
+            # L'escalade s'appuie sur le contexte exact donné au RAG quand il est disponible
             context = rag_trace.get("context", "") if isinstance(rag_trace, dict) else ""
             answer = _maybe_escalate(trace, question, intent, answer,
                                      context or tool_result_to_text(tool_outputs["search_history_rag"]))
@@ -254,7 +259,7 @@ def _run_assistant(
             }
 
         else:
-            # Question que les règles ne savent pas classer : on laisse l'agent choisir ses outils
+            # Question qu'aucune règle ne reconnaît : l'agent choisit lui-même ses outils
             from src.ai.agent import run_agent
 
             answer, agent_trace = run_agent(question, df, qdrant_client, rag_documents)
@@ -307,10 +312,7 @@ def _evaluate_unified_answer(
     tool_results_text: str,
     intent: str,
 ) -> tuple[int, str]:
-    """
-    Évalue la pertinence de la réponse finale de l'assistant unifié
-    par rapport aux résultats des outils utilisés.
-    """
+    """Note (0-100) et explication du juge : la réponse est-elle fidèle aux résultats des outils ?"""
     context = f"""
 Intention détectée :
 {intent}

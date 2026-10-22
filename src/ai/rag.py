@@ -1,5 +1,8 @@
 """
-rag.py — RAG avancé avec Hybrid Search + Reranking + MMR + HyDE + Citations
+rag.py — RAG sur les profils historiques des stations (un document par station).
+
+Recherche hybride (HyDE, BM25 + cosinus fusionnés par RRF, MMR, reranking LLM optionnel),
+puis réponse du LLM avec citations des sources, notée par le juge de pertinence.
 """
 import os
 import numpy as np
@@ -18,6 +21,10 @@ def _load_profiles() -> pd.DataFrame:
 
 
 def _hyde_expand_query(question: str) -> str:
+    """
+    HyDE : ajoute à la question un faux profil au format du corpus, pour que son embedding
+    tombe plus près des vrais documents. En cas d'échec du LLM, la question seule.
+    """
     try:
         prompt = f"""Tu dois generer un exemple de document Velib qui pourrait repondre a cette question.
 Le document doit ressembler exactement a ce format :
@@ -46,10 +53,7 @@ Exemples de documents :"""
         return question
 
 def _bm25_search(query: str, documents: list[dict], top_k: int = 20) -> list[tuple[int, float]]:
-    """
-    BM25 — recherche lexicale sur les documents.
-    Retourne liste de (index, score).
-    """
+    """Recherche lexicale BM25 : liste de (index, score), vide en cas d'erreur."""
     try:
         from rank_bm25 import BM25Okapi
 
@@ -68,11 +72,12 @@ def _bm25_search(query: str, documents: list[dict], top_k: int = 20) -> list[tup
 
 
 def _cosine_search(query_expanded, documents, top_k=20):
+    """Recherche sémantique par similarité cosinus : liste de (index, score), vide en cas d'erreur."""
     try:
         from src.ai.embeddings import embed_passages, embed_query
         query_embedding = embed_query(query_expanded)
 
-        # Utilise les embeddings precalcules si disponibles
+        # Vecteurs précalculés par le pipeline si présents, sinon encodage à la volée
         if documents and "embedding" in documents[0]:
             corpus_embeddings = np.array([d["embedding"] for d in documents])
         else:
@@ -93,8 +98,8 @@ def _reciprocal_rank_fusion(
     k: int = 60,
 ) -> list[tuple[int, float]]:
     """
-    RRF — fusionne les rankings BM25 et cosine.
-    Score RRF = 1/(k + rank_bm25) + 1/(k + rank_cosine)
+    Fusion RRF des classements BM25 et cosinus : score = Σ 1/(k + rang).
+    Seul le rang compte, ce qui évite de comparer des scores d'échelles différentes.
     """
     rrf_scores: dict[int, float] = {}
 
@@ -114,7 +119,11 @@ def _mmr_rerank(
     top_k: int = 8,
     lambda_param: float = 0.7,
 ) -> list[int]:
-    # Déduplique par station pour éviter les doublons
+    """
+    MMR (Maximal Marginal Relevance) : choisit des documents pertinents ET variés.
+    lambda_param : 1.0 = pertinence pure, 0.0 = diversité pure. Les candidats sont d'abord
+    dédupliqués par station, puis seuls les 30 premiers sont considérés.
+    """
     seen_stations = set()
     candidates_deduped = []
     for idx, score in candidates:
@@ -123,11 +132,6 @@ def _mmr_rerank(
             seen_stations.add(station)
             candidates_deduped.append((idx, score))
     candidates = candidates_deduped
-    """
-    MMR — Maximal Marginal Relevance.
-    Sélectionne les documents pertinents ET diversifiés.
-    lambda_param : 1.0 = pertinence pure, 0.0 = diversité pure
-    """
     try:
         candidate_indices = [idx for idx, _ in candidates[:30]]
         if all("embedding" in documents[i] for i in candidate_indices):
@@ -141,7 +145,7 @@ def _mmr_rerank(
 
         while len(selected) < top_k and remaining:
             if not selected:
-                # Premier doc — le plus pertinent
+                # Premier choix : le plus pertinent, sans terme de diversité
                 cosine_scores = np.dot(candidate_embeddings, query_embedding) / (
                     np.linalg.norm(candidate_embeddings, axis=1)
                     * np.linalg.norm(query_embedding)
@@ -153,14 +157,13 @@ def _mmr_rerank(
                 best = None
 
                 for i in remaining:
-                    # Pertinence avec la query
                     relevance = np.dot(candidate_embeddings[i], query_embedding) / (
                         np.linalg.norm(candidate_embeddings[i])
                         * np.linalg.norm(query_embedding)
                         + 1e-10
                     )
 
-                    # Similarité max avec les docs déjà sélectionnés
+                    # Pénalité : ressemblance au document déjà retenu le plus proche
                     max_sim = max(
                         np.dot(candidate_embeddings[i], candidate_embeddings[s]) / (
                             np.linalg.norm(candidate_embeddings[i])
@@ -170,7 +173,6 @@ def _mmr_rerank(
                         for s in selected
                     )
 
-                    # Score MMR
                     mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim
 
                     if mmr_score > best_score:
@@ -192,8 +194,8 @@ def _rerank_with_llm(
     top_k: int = 5,
 ) -> list[dict]:
     """
-    Reranking léger par LLM — évalue la pertinence de chaque doc.
-    Utilisé sur les top candidats après MMR.
+    Reranking par LLM des candidats issus de MMR (désactivé par défaut : un appel de plus).
+    En cas d'échec, l'ordre d'entrée est conservé.
     """
     if len(candidates) <= top_k:
         return candidates
@@ -238,9 +240,8 @@ def hybrid_search(
     use_rerank: bool = False,
 ) -> tuple[list[dict], dict]:
     """
-    Pipeline complet :
-    HyDE → BM25 + Cosine → RRF → MMR → Reranking LLM
-    Retourne (documents_selectionnés, trace)
+    HyDE → BM25 + cosinus → RRF → MMR → reranking LLM ; court-circuité si la question
+    cite une station. Retourne (documents retenus, trace des étapes pour l'interface).
     """
     trace = {
         "hyde_query": "",
@@ -267,7 +268,7 @@ def hybrid_search(
         trace["final_docs"] = [f"{d['metadata']['station']} ({d['metadata']['run_at']})" for d in station_docs]
         return station_docs, trace
 
-    # Étape 1 — HyDE
+    # Étape 1 — HyDE (sert seulement la recherche sémantique ; BM25 garde la question brute)
     if use_hyde and GROQ_API_KEY:
         expanded_query = _hyde_expand_query(question)
         trace["hyde_query"] = expanded_query
@@ -283,7 +284,7 @@ def hybrid_search(
     ]
     trace["techniques_used"].append("BM25")
 
-    # Étape 3 — Cosine similarity
+    # Étape 3 — Similarité cosinus
     cosine_results = _cosine_search(expanded_query, documents, top_k=30)
     trace["cosine_top5"] = [
         documents[idx]["metadata"]["station"]
@@ -291,7 +292,7 @@ def hybrid_search(
     ]
     trace["techniques_used"].append("Cosine Similarity")
 
-    # Étape 4 — RRF fusion
+    # Étape 4 — Fusion RRF
     fused = _reciprocal_rank_fusion(bm25_results, cosine_results)
     trace["rrf_top5"] = [
         documents[idx]["metadata"]["station"]
@@ -367,19 +368,18 @@ def build_rag_index(profiles: pd.DataFrame = None):
 
 def ask_rag(question: str, documents) -> tuple[str, dict]:
     """
-    RAG avancé avec pipeline complet.
-    Retourne (réponse, trace).
+    Répond à une question historique à partir des profils retenus par hybrid_search,
+    avec citations [Source N] et note de pertinence. Retourne (réponse, trace).
     """
     if not documents:
         return "Index RAG non disponible : aucun profil de station dans le lakehouse.", {}
 
-    # Pipeline hybrid search
     final_docs, search_trace = hybrid_search(question, documents)
 
     if not final_docs:
         return "Aucune donnee pertinente trouvee.", search_trace
 
-    # Construction du contexte avec citations
+    # Chaque document est précédé de sa citation, que le LLM doit reprendre
     context_parts = []
     for i, doc in enumerate(final_docs):
         meta = doc["metadata"]
@@ -426,7 +426,7 @@ Question : {question}
             for d in final_docs
         ]
 
-        # Vérification de la pertinence, sur les mêmes documents que ceux donnés au LLM
+        # Le juge note la réponse sur les mêmes documents que ceux donnés au LLM
         relevance_score, relevance_explanation = verify_relevance(
             question=question,
             answer=answer,

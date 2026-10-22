@@ -1,5 +1,7 @@
 """
-nlp_utils.py — Outils NLP simples pour l'analyse des questions utilisateur.
+nlp_utils.py — Analyse légère des questions (normalisation, mots-clés, horizon temporel).
+
+Utilisé par le routeur et les agents ; volontairement sans dépendance NLP lourde.
 """
 
 import re
@@ -16,6 +18,7 @@ FRENCH_STOPWORDS = {
 
 
 def normalize_text(text: str) -> str:
+    """Minuscules, sans accents ni ponctuation (l'apostrophe devient une espace : « aujourd hui »)."""
     text = text.lower().strip()
     text = unicodedata.normalize("NFKD", text)
     text = "".join(c for c in text if not unicodedata.combining(c))
@@ -29,6 +32,7 @@ def tokenize(text: str) -> List[str]:
 
 
 def extract_keywords(text: str, min_length: int = 3) -> List[str]:
+    """Mots normalisés utiles de la question, sans mots vides ni mots trop courts."""
     tokens = tokenize(text)
 
     return [
@@ -39,6 +43,7 @@ def extract_keywords(text: str, min_length: int = 3) -> List[str]:
 
 
 def detect_time_expression(text: str) -> List[str]:
+    """Périodes citées dans la question (matin, week-end…), sous leur forme normalisée."""
     normalized = normalize_text(text)
 
     expressions = []
@@ -68,8 +73,9 @@ _NUMBER_WORDS = {"une": 1, "un": 1, "deux": 2, "trois": 3, "quatre": 4, "cinq": 
 
 def parse_time_target(question: str) -> dict:
     """
-    Horizon demandé dans la question :
-    « dans 3 h », « dans deux heures » → {"hours_ahead": 3} ; « à 18h », « vers 18 h 30 » → {"at_hour": 18}.
+    Horizon demandé dans la question, {} si aucun :
+    « dans 3 h », « dans trois heures » → {"hours_ahead": 3} ; « à 18h », « vers 18 h 30 » → {"at_hour": 18}.
+    Les minutes sont ignorées : le modèle de prévision raisonne à l'heure.
     """
     q = question.lower()
     match = re.search(r"dans\s+(\d+|une|un|deux|trois|quatre|cinq|six)\s*(?:h\b|heures?)", q)

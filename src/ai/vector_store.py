@@ -1,8 +1,9 @@
 """
-vector_store.py — Qdrant Cloud : recherche sémantique sur les profils des stations.
+vector_store.py — Qdrant Cloud, optionnel : recherche sémantique sur les profils des stations.
 
-Un point par station (document construit depuis le gold dbt, voir profile_docs.py).
-La collection est reconstruite automatiquement quand le gold change.
+Ne sert que de repli quand l'index RAG n'est pas chargé ; sans QDRANT_URL / QDRANT_API_KEY,
+tout renvoie None ou une liste vide. Un point par station (document construit depuis le gold
+dbt, voir profile_docs.py), réindexé quand la version du gold change.
 """
 import os
 import uuid
@@ -50,7 +51,10 @@ def _indexed_version(client) -> str:
 
 
 def index_documents(client, documents: list[dict], version: str) -> int:
-    """(Ré)indexe Qdrant avec des documents dont le vecteur est déjà calculé (doc["embedding"])."""
+    """
+    Recrée la collection à partir de vecteurs déjà calculés (doc["embedding"]).
+    Identifiants dérivés du station_id : une réindexation remplace les points au lieu de les dupliquer.
+    """
     from qdrant_client.models import Distance, PayloadSchemaType, PointStruct, VectorParams
 
     if _collection_exists(client):
@@ -79,9 +83,10 @@ def index_documents(client, documents: list[dict], version: str) -> int:
 
 def build_qdrant_index(documents: list[dict] | None = None):
     """
-    Côté application : se connecte à Qdrant sans jamais encoder de documents.
-    L'index est tenu à jour par le pipeline (pipeline/embed.py) ; si la collection manque,
-    on la recrée à partir des vecteurs précalculés du gold. Renvoie (client, nombre de points).
+    Côté application : connexion à Qdrant, sans jamais encoder de documents.
+    Le pipeline (pipeline/embed.py) tient l'index à jour ; si la collection manque ou date d'une
+    autre version du gold, on la recrée depuis les vecteurs précalculés. Renvoie (client, nombre
+    de points), ou (None, 0) si Qdrant n'est pas configuré ou injoignable.
     """
     try:
         client = _get_qdrant_client()
@@ -104,7 +109,7 @@ def build_qdrant_index(documents: list[dict] | None = None):
 
 
 def semantic_search(query: str, client, n_results: int = 8) -> list:
-    """Recherche sémantique dans Qdrant."""
+    """Textes des profils les plus proches, filtrés sur la station si la requête en nomme une."""
     if client is None:
         return []
 
@@ -148,6 +153,10 @@ def semantic_search(query: str, client, n_results: int = 8) -> list:
         return [f"DEBUG semantic_search erreur : {e}"]
 
 def extract_station_from_query(query: str, client) -> str | None:
+    """
+    Station la plus probablement visée par la requête, par score heuristique sur les mots
+    communs avec les noms indexés ; None si aucun candidat n'est assez convaincant.
+    """
     if client is None:
         return None
 
@@ -201,30 +210,30 @@ def extract_station_from_query(query: str, client) -> str | None:
 
             score = 0
 
-            # Bonus énorme si le nom complet apparaît dans la requête
+            # Nom complet cité : quasi certain
             if station_norm in q_norm:
                 score += 100
 
-            # Mots exacts en commun
             common_words = set(q_words) & station_words
             score += len(common_words) * 15
 
-            # Bonus mot important présent dans la station
+            # Correspondance partielle (« BASTIL » dans « BASTILLE »)
             for word in q_words:
                 if word in station_norm:
                     score += 5
 
-            # Bonus fort si le dernier mot distinctif matche
+            # Le nom de station arrive souvent en fin de question
             if q_words and q_words[-1] in station_norm:
                 score += 20
 
-            # Léger malus si la station est beaucoup plus longue
+            # Départage en faveur des noms courts, plus proches de la requête
             score -= max(0, len(station_words) - len(set(q_words)))
 
             if score > best_score:
                 best_score = score
                 best_match = station
 
+        # Seuil ≈ un mot en commun : en dessous, mieux vaut chercher sans filtre que filtrer à tort
         return best_match if best_score >= 20 else None
 
     except Exception:

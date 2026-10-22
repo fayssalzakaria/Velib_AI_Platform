@@ -1,5 +1,7 @@
 """
-router.py — Routage automatique des questions utilisateur
+router.py — Routage des questions de l'assistant vers une intention, par mots-clés.
+
+Sans LLM : déterministe, gratuit et explicable (la trace montre la règle et les mots déclencheurs).
 """
 
 from src.ai.nlp_utils import detect_time_expression, extract_keywords, parse_time_target
@@ -72,7 +74,7 @@ KEYWORDS_NOW = [
     "aujourd'hui",
 ]
 
-# Question sur le futur proche : le modèle de prévision répond
+# Question sur le futur proche : le modèle de prévision répond (horizon lu par parse_time_target)
 KEYWORDS_FORECAST = [
     "dans une heure",
     "dans 1h",
@@ -109,6 +111,7 @@ KEYWORDS_REPORT = [
 
 
 def _matched(q: str, keywords: list[str]) -> list[str]:
+    """Mots-clés présents dans la question (recherche de sous-chaîne, `q` déjà en minuscules)."""
     return [kw for kw in keywords if kw in q]
 
 
@@ -122,8 +125,9 @@ def _route(intent: str, rule: str, matched: list[str], reason: str) -> dict:
 
 def classify_question_rule_based(question: str) -> dict:
     """
-    Classification sans LLM, par règles testées dans l'ordre (la première qui s'applique gagne).
-    Rapide, gratuite et déterministe.
+    Règles testées dans l'ordre, la première qui s'applique gagne. L'ordre compte :
+    rapport, puis prévision, puis habitude avant anomalie (« souvent vide » est historique),
+    et un marqueur d'instant présent (« maintenant ») écarte l'historique et l'heure cible.
     """
     q = question.lower()
     keywords = extract_keywords(question)
@@ -162,5 +166,5 @@ def classify_question_rule_based(question: str) -> dict:
 
 
 def classify_question(question: str) -> dict:
-    """Route la question vers une intention, par règles : sans appel LLM."""
+    """Point d'entrée du routage (aujourd'hui uniquement par règles)."""
     return classify_question_rule_based(question)

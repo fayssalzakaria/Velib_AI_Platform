@@ -1,14 +1,12 @@
 """
 lake.py — Lecture du lakehouse Vélib' depuis Streamlit (DuckDB, lecture seule).
 
-- silver/station_status (Delta)            : historique d'une station, dernier snapshot
-- gold/gold_station_period_profile.parquet : profils des stations (RAG, Qdrant)
-- gold/gold_network_snapshots.parquet      : série temporelle du réseau
+- silver/station_status (Delta)               : snapshots bruts, base du mode Historique et du secours API
+- gold/gold_station_period_profile.parquet    : profils des stations (RAG)
+- gold/station_profile_embeddings.parquet     : vecteurs de ces profils, calculés par le pipeline
 
-LAKE_ROOT = s3://<bucket>/lake (secrets Streamlit) ou un chemin local.
-Identifiants S3 : AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY d'un utilisateur en lecture seule.
-Toutes les fonctions renvoient un DataFrame vide si le lakehouse est inaccessible :
-l'application passe alors en mode temps réel seul.
+LAKE_ROOT vaut s3://<bucket>/lake (secrets Streamlit) ou un chemin local.
+Si le lakehouse est inaccessible, tout renvoie un DataFrame vide : l'application reste en temps réel seul.
 """
 import logging
 import os
@@ -42,7 +40,10 @@ def _gold(table: str) -> str:
 
 
 def _connect():
-    """Connexion DuckDB unique, avec extensions et secret S3."""
+    """
+    Connexion DuckDB unique, ouverte à la première requête.
+    Le secret S3 inclut le jeton de session : il est requis avec des identifiants temporaires (rôle IAM).
+    """
     global _connection
     if _connection is not None:
         return _connection
@@ -71,7 +72,7 @@ def query(sql: str, params: list | None = None) -> pd.DataFrame:
     if not is_configured():
         return pd.DataFrame()
     try:
-        with _lock:  # une connexion DuckDB partagée entre les sessions Streamlit
+        with _lock:  # connexion partagée entre les sessions Streamlit : une requête à la fois
             return _connect().execute(sql, params or []).df()
     except Exception as e:
         logger.warning(f"Lakehouse inaccessible : {e}")
@@ -122,7 +123,7 @@ def station_history(station_name: str, hours: int) -> pd.DataFrame:
 
 
 def latest_snapshot() -> pd.DataFrame:
-    """Dernier snapshot du silver : secours quand l'API temps réel est injoignable."""
+    """Dernier snapshot du silver : secours quand l'API temps réel est injoignable (seuls les 2 derniers jours sont lus)."""
     df = query(f"""
         WITH s AS (SELECT * FROM {_silver()} WHERE date >= ?)
         SELECT station_id, name, numbikesavailable, mechanical, ebike, numdocksavailable,
@@ -137,7 +138,7 @@ def latest_snapshot() -> pd.DataFrame:
 
 
 def station_period_profiles() -> pd.DataFrame:
-    """Profils gold par station / type de jour / période (construits par dbt chaque jour)."""
+    """Profils gold par station, type de jour et période (reconstruits chaque jour par dbt)."""
     return query(f"SELECT * FROM {_gold('gold_station_period_profile')}")
 
 
@@ -147,7 +148,10 @@ def station_embeddings() -> pd.DataFrame:
 
 
 def _since(days: int | None) -> tuple[str, list]:
-    """Filtre de période sur le silver (élague les partitions date=). days=None : tout l'historique."""
+    """
+    Clause WHERE de période. Le filtre sur `date` en plus de `ingested_at` permet à DuckDB
+    d'ignorer les partitions hors période. days=None : tout l'historique.
+    """
     if days is None:
         return "TRUE", []
     since = datetime.now(timezone.utc) - timedelta(days=days)

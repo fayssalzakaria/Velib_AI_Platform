@@ -1,5 +1,6 @@
 """
-tools.py — Outils métier utilisables par l'assistant IA Vélib
+tools.py — Logique métier des outils de l'IA : état d'une station, du réseau, anomalies,
+historique, prévision et rapport PDF. Chaque fonction renvoie un dict prêt à passer au LLM.
 """
 
 import json
@@ -29,6 +30,7 @@ def current_moment() -> dict:
 
 
 def get_station_info_tool(station_name: str, df: pd.DataFrame) -> dict:
+    """État temps réel de la station la plus proche du nom demandé, et les autres candidates."""
     if df is None or df.empty:
         return {"error": "Données temps réel non disponibles."}
 
@@ -36,6 +38,7 @@ def get_station_info_tool(station_name: str, df: pd.DataFrame) -> dict:
 
     # Recherche insensible aux accents et à l'ordre des mots (« republique » → « RÉPUBLIQUE »)
     results = search_stations(df, station_name)
+    # Repli : la requête peut être une phrase entière où le nom de station est noyé
     if results.empty:
         cited = stations_in_question(station_name, df["name"].dropna().unique())
         results = df[df["name"].isin(cited)]
@@ -89,6 +92,7 @@ def get_network_stats_tool(df: pd.DataFrame) -> dict:
 
 
 def detect_anomalies_tool(df: pd.DataFrame) -> dict:
+    """Règles simples sur le snapshot : stations vides ou presque pleines, part d'électriques trop basse."""
     if df is None or df.empty:
         return {"error": "Données temps réel non disponibles."}
 
@@ -96,6 +100,7 @@ def detect_anomalies_tool(df: pd.DataFrame) -> dict:
     heure = now.hour
     anomalies = []
 
+    # Une station vide pèse plus aux heures de pointe : on la signale à part
     if 7 <= heure <= 9 or 17 <= heure <= 19:
         vides = df[df["is_empty"]]["name"].tolist()
         if vides:
@@ -151,7 +156,7 @@ def detect_anomalies_tool(df: pd.DataFrame) -> dict:
 
 
 def search_history_rag_tool(question: str, documents) -> tuple[str, dict]:
-    """Réponse rédigée par le RAG historique (profils des stations)."""
+    """Réponse rédigée par le RAG sur les profils des stations (utilisée par l'assistant à routage)."""
     if documents:
         return ask_rag(question, documents)
     return (
@@ -163,8 +168,8 @@ def search_history_rag_tool(question: str, documents) -> tuple[str, dict]:
 
 def search_history_tool(query: str, rag_documents=None, qdrant_client=None, rerank: bool = True) -> dict:
     """
-    Recherche dans l'historique (profils des stations) : RAG hybride via le retriever LangChain,
-    ou recherche sémantique Qdrant si l'index RAG n'est pas chargé.
+    Extraits bruts des profils historiques, sans rédaction : le LLM appelant s'en charge.
+    RAG hybride en priorité ; Qdrant ne sert que de repli si l'index RAG n'est pas chargé.
     """
     if rag_documents:
         from src.ai.retriever import ProfileRetriever
@@ -187,10 +192,7 @@ def forecast_tool(station_name: str | None, hours_ahead: int | None = None, at_h
 
 
 def generate_report_tool(df: pd.DataFrame) -> dict:
-    """
-    Génère un rapport PDF en mémoire.
-    Le rendu Streamlit gèrera le téléchargement si besoin.
-    """
+    """Rapport PDF en mémoire ; l'interface Streamlit propose ensuite le téléchargement."""
     if df is None or df.empty:
         return {"error": "Impossible de générer un rapport sans données."}
 
@@ -205,9 +207,7 @@ def generate_report_tool(df: pd.DataFrame) -> dict:
 
 
 def tool_result_to_text(data) -> str:
-    """
-    Convertit un résultat tool en texte lisible par le LLM.
-    """
+    """Résultat d'outil en JSON pour le LLM ; le PDF est remplacé par sa taille."""
     try:
         safe_data = data.copy() if isinstance(data, dict) else data
 

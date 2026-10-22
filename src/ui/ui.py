@@ -1,3 +1,8 @@
+"""
+ui.py — Mode Temps réel : barre latérale, snapshot de session, carte, graphiques et téléchargements.
+
+Le snapshot est pris par session et partagé avec les onglets IA (render_snapshot_bar).
+"""
 from datetime import datetime
 
 import pandas as pd
@@ -14,7 +19,7 @@ from src.data.history import get_lake_status
 
 
 def render_sidebar():
-    """Choix du mode ; les filtres ne concernent que le snapshot temps réel."""
+    """Choix du mode, puis période (Historique) ou filtres (Temps réel) : renvoie (mode, filtres, jours)."""
     st.sidebar.title("Configuration")
 
     mode = st.sidebar.radio(
@@ -54,7 +59,7 @@ def render_sidebar():
 def get_session_snapshot(refresh: bool = False) -> pd.DataFrame | None:
     """
     Snapshot propre à la session : pris à l'arrivée sur la page, puis à chaque rafraîchissement.
-    Si l'API est injoignable : on garde le snapshot précédent, sinon le dernier du lakehouse.
+    API injoignable : on garde le snapshot précédent, à défaut le dernier du lakehouse, sinon None.
     """
     if not refresh and "snapshot_df" in st.session_state:
         return st.session_state.snapshot_df
@@ -92,7 +97,10 @@ SNAPSHOT_BUTTON_PREFIX = "snapshot_refresh_"
 
 
 def handle_snapshot_refresh() -> None:
-    """À appeler en tout début de page : un clic sur n'importe quel bouton « Récupérer » reprend le snapshot."""
+    """
+    À appeler en tout début de page : un clic sur n'importe quel bouton « Récupérer » reprend le snapshot
+    avant que la page ne soit dessinée, pour que tous les bandeaux affichent le même.
+    """
     if any(v for k, v in st.session_state.items() if str(k).startswith(SNAPSHOT_BUTTON_PREFIX)):
         get_session_snapshot(refresh=True)
 
@@ -113,8 +121,7 @@ def render_snapshot_bar(key: str, label: str = "Données temps réel") -> pd.Dat
     """
     col_info, col_button = st.columns([3, 1])
     with col_button:
-        # Le clic est traité en début de page (handle_snapshot_refresh) pour que tous les bandeaux
-        # affichent le même snapshot
+        # Pas de traitement ici : le clic est lu en début de page par handle_snapshot_refresh
         st.button(
             "📡 Récupérer un nouveau snapshot",
             key=f"{SNAPSHOT_BUTTON_PREFIX}{key}",
@@ -131,7 +138,7 @@ def render_snapshot_bar(key: str, label: str = "Données temps réel") -> pd.Dat
 
 
 def render_metrics(df_filtered):
-    """Statistiques du snapshot temps réel uniquement."""
+    """Indicateurs clés du snapshot filtré."""
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     col1.metric("Stations", len(df_filtered))
     col2.metric("Velos dispo", f"{int(df_filtered['numbikesavailable'].sum()):,}")
@@ -339,7 +346,6 @@ def render_station_detail(df_filtered):
 
     row = results[results["name"] == station_name].iloc[0]
 
-    # Données temps réel
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Velos dispo", int(row["numbikesavailable"]))
     c2.metric("Dont electriques", int(row["ebike"]))
@@ -358,6 +364,7 @@ def render_station_detail(df_filtered):
 
 
 def render_lake_sidebar():
+    """État du lakehouse dans la barre latérale : dit si le mode Historique a des données."""
     st.sidebar.divider()
     st.sidebar.subheader("Lakehouse")
 

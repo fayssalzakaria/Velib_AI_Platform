@@ -9,13 +9,14 @@ Trois questions, mêmes features :
 Une ligne = (station, instant t, horizon h). L'horizon est une feature : un seul modèle par
 question apprend que l'état actuel compte à court terme et les habitudes à plus long terme.
 
-Une seule définition, utilisée à l'entraînement (pipeline/forecast.py) ET à la prédiction
+Une seule définition, utilisée à l'entraînement (pipeline/forecast.py) et à la prédiction
 (src/ml/forecast.py) : c'est ce qui évite l'écart entre ce que le modèle a appris et ce qu'on
 lui donne en production (training-serving skew).
 
 Aucune feature ne regarde le futur : les habitudes d'une station (taux de vide, de plein,
-vélos moyens à l'heure visée) n'utilisent que les observations antérieures. La météo de l'heure
-visée est une prévision (Open-Meteo) à la prédiction, et une valeur observée à l'entraînement.
+vélos moyens à l'heure visée) n'utilisent que les observations antérieures. Seule entorse
+assumée : la météo de l'heure visée est observée à l'entraînement, prévue (Open-Meteo) à la
+prédiction.
 """
 from functools import lru_cache
 
@@ -31,7 +32,7 @@ FEATURES = [
     "delta_1h", "delta_2h",
     "hour_target", "weekday_target", "is_weekend_target",
     "past_rate_empty", "past_rate_full", "past_mean_bikes", "past_n",
-    # Données externes (manquantes = NaN, géré nativement par LightGBM)
+    # Données externes : une valeur manquante reste NaN, LightGBM sait la traiter
     "temperature", "precipitation", "wind_speed",
     "is_public_holiday", "is_school_holiday",
 ]
@@ -42,12 +43,13 @@ SILVER_COLUMNS = [
     "station_id", "name", "ingested_at", "numbikesavailable", "numdocksavailable",
     "ebike", "bike_ratio", "is_empty", "is_full", "lat", "lon",
 ]
-# Habitudes cumulées par (station, heure de la journée) : (colonne d'état, nom de la statistique)
+# Habitudes par (station, heure de la journée) : colonne d'état -> somme cumulée correspondante.
+# Divisées par past_n dans _assemble pour donner past_rate_empty, past_rate_full, past_mean_bikes.
 _PAST_STATS = {"is_empty_now": "past_empty", "is_full_now": "past_full", "bikes": "past_bikes_sum"}
 
 
 def _state(df: pd.DataFrame) -> pd.DataFrame:
-    """État d'une station à un instant : colonnes communes aux deux usages."""
+    """État de chaque station à l'instant du snapshot, recalculé depuis les comptes bruts."""
     out = pd.DataFrame({
         "station_id": df["station_id"].astype(str),
         "ts": pd.to_datetime(df["ingested_at"], utc=True),
@@ -66,13 +68,17 @@ def _state(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _lag(state: pd.DataFrame, hours: int) -> pd.DataFrame:
-    """Nombre de vélos `hours` heures plus tôt, aligné sur l'instant courant."""
+    """
+    Nombre de vélos `hours` heures plus tôt, décalé pour se joindre sur l'instant courant.
+    Jointure exacte sur ts : si le snapshot correspondant manque, le lag reste NaN.
+    """
     lag = state[["station_id", "ts", "bikes"]].copy()
     lag["ts"] = lag["ts"] + pd.Timedelta(hours=hours)
     return lag.rename(columns={"bikes": f"bikes_lag{hours}"})
 
 
 def _calendar(ts_target: pd.Series) -> pd.DataFrame:
+    """Heure et jour de l'heure visée, en heure de Paris (c'est elle qui rythme les usages)."""
     local = ts_target.dt.tz_convert(PARIS_TZ)
     return pd.DataFrame({
         "hour_target": local.dt.hour.astype(float),
@@ -116,13 +122,13 @@ def _external(ts_target: pd.Series, weather: pd.DataFrame | None, school: pd.Dat
 
 def _assemble(frame: pd.DataFrame, weather: pd.DataFrame | None = None,
               school: pd.DataFrame | None = None) -> pd.DataFrame:
-    """Dernière étape commune : variations, calendrier, habitudes et données externes de l'heure visée."""
+    """Dernière étape commune aux deux usages : variations, calendrier, habitudes et données externes."""
     frame = frame.reset_index(drop=True)
     frame["delta_1h"] = frame["bikes"] - frame["bikes_lag1"]
     frame["delta_2h"] = frame["bikes"] - frame["bikes_lag2"]
     frame["ts_target"] = frame["ts"] + pd.to_timedelta(frame["horizon"], unit="h")
     frame = frame.join(_calendar(frame["ts_target"])).join(_external(frame["ts_target"], weather, school))
-    n = frame["past_n"].replace(0, np.nan)
+    n = frame["past_n"].replace(0, np.nan)  # sans historique, les taux restent NaN plutôt que 0
     frame["past_rate_empty"] = frame["past_empty"] / n
     frame["past_rate_full"] = frame["past_full"] / n
     frame["past_mean_bikes"] = frame["past_bikes_sum"] / n
@@ -140,7 +146,8 @@ def training_frame(silver: pd.DataFrame, weather: pd.DataFrame | None = None,
     state = _state(silver).sort_values(["station_id", "ts"])
     state["hour_local"] = state["ts"].dt.tz_convert(PARIS_TZ).dt.hour
 
-    # Habitudes « même heure de la journée », en ne comptant que les observations antérieures
+    # Habitudes « même heure de la journée » : cumul moins la ligne courante, donc uniquement
+    # les observations antérieures (pas de fuite de la cible dans les features)
     group = state.groupby(["station_id", "hour_local"], sort=False)
     state["past_n"] = group.cumcount()
     for column, stat in _PAST_STATS.items():
@@ -151,7 +158,8 @@ def training_frame(silver: pd.DataFrame, weather: pd.DataFrame | None = None,
         .merge(_lag(state, 1), on=["station_id", "ts"], how="left")
         .merge(_lag(state, 2), on=["station_id", "ts"], how="left")
     )
-    # Cibles et habitudes de l'heure visée : on lit la ligne de t + h
+    # Cibles et habitudes de l'heure visée : on lit la ligne de t + h. Ses habitudes ne couvrent
+    # que les jours précédents (h < 24), donc rien d'inconnu à l'instant t.
     target_cols = ["station_id", "ts", "is_empty_now", "is_full_now", "bikes", "past_n", *_PAST_STATS.values()]
     renamed = {"is_empty_now": TARGETS["empty"], "is_full_now": TARGETS["full"], "bikes": TARGETS["bikes"]}
 
@@ -169,8 +177,8 @@ def serving_frame(current: pd.DataFrame, lag1: pd.DataFrame, lag2: pd.DataFrame,
                   school: pd.DataFrame | None = None, horizons=HORIZONS) -> pd.DataFrame:
     """
     Mêmes features pour le dernier snapshot connu, pour chaque horizon.
-    hour_stats : par (station, heure de la journée), sur tout l'historique (donc du passé) :
-    past_n, past_empty, past_full, past_bikes_sum.
+    hour_stats : agrégats par (station, heure de la journée) sur tout l'historique, qui est
+    entièrement passé ici : past_n, past_empty, past_full, past_bikes_sum.
     """
     state = _state(current)
     base = state.merge(_lag(_state(lag1), 1) if not lag1.empty else _empty_lag(1), on=["station_id", "ts"], how="left")
@@ -183,11 +191,12 @@ def serving_frame(current: pd.DataFrame, lag1: pd.DataFrame, lag2: pd.DataFrame,
         rows = base.assign(horizon=float(h))
         rows["hour"] = (rows["ts"] + pd.Timedelta(hours=h)).dt.tz_convert(PARIS_TZ).dt.hour
         rows = rows.merge(stats[["station_id", "hour", *stat_cols]], on=["station_id", "hour"], how="left")
-        rows[stat_cols] = rows[stat_cols].fillna(0)
+        rows[stat_cols] = rows[stat_cols].fillna(0)  # station nouvelle : past_n = 0, comme à l'entraînement
         frames.append(rows.drop(columns="hour"))
     return _assemble(pd.concat(frames, ignore_index=True), weather, school)
 
 
 def _empty_lag(hours: int) -> pd.DataFrame:
+    """Lag vide mais typé, quand le snapshot d'il y a `hours` heures manque."""
     return pd.DataFrame({"station_id": pd.Series(dtype=str), "ts": pd.Series(dtype="datetime64[ns, UTC]"),
                          f"bikes_lag{hours}": pd.Series(dtype=float)})

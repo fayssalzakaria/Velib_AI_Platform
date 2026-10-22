@@ -1,5 +1,6 @@
 """
-evaluation.py — Banc d'évaluation : Assistant (routage par règles) vs Agent (le LLM choisit ses outils).
+evaluation.py — Banc d'évaluation : Assistant (routage par règles) contre Agent (le LLM choisit
+ses outils), plus un banc séparé pour l'agent opérateur.
 
 Chaque question du jeu annoté est posée aux deux systèmes. On mesure :
 - qualité : pertinence (LLM-as-a-judge, 0-100), bons outils appelés, bonne station citée, erreurs ;
@@ -20,6 +21,7 @@ _TOOL_ALIASES = {"search_history_rag": "search_history"}
 
 @dataclass(frozen=True)
 class EvalCase:
+    """Question annotée : outils attendus et, si la réponse doit la nommer, la station attendue."""
     question: str
     expected_tools: frozenset
     expected_station: str | None = None
@@ -44,7 +46,7 @@ EVAL_SET = [
 ]
 
 
-# Questions de rééquilibrage pour l'agent opérateur (plan d'actions, pas de réponse factuelle unique)
+# Agent opérateur : la réponse est un plan d'actions, pas un fait unique, d'où des métriques à part
 OPERATOR_QUESTIONS = [
     "Que faut-il rééquilibrer en ce moment ?",
     "Quelles stations approvisionner en priorité dans les 2 prochaines heures ?",
@@ -56,6 +58,7 @@ def _normalize_tools(tools: list[str]) -> set[str]:
 
 
 def _score(case: EvalCase, system: str, answer: str, tools: list[str], trace) -> dict:
+    """Une ligne de résultats ; appeler des outils en plus de ceux attendus n'est pas pénalisé."""
     used = _normalize_tools(tools)
     return {
         "system": system,
@@ -108,6 +111,8 @@ def run_operator_benchmark(df, rag_documents=None, qdrant_client=None, questions
     rows = []
     for question in questions:
         answer, trace = run_operator(question, df, rag_documents, qdrant_client)
+        # Approximation : format_plan ne mentionne « écartée » qu'une fois, quel que soit
+        # le nombre d'actions rejetées ; le taux d'actions valides est donc surestimé.
         proposed = len(trace.plan.get("actions", [])) + answer.count("écartée")
         rows.append({
             "system": "Opérateur",
@@ -126,7 +131,7 @@ def run_operator_benchmark(df, rag_documents=None, qdrant_client=None, questions
 
 
 def summarize(results: pd.DataFrame) -> pd.DataFrame:
-    """Une ligne par système : moyennes de qualité et de consommation par question."""
+    """Une ligne par système : moyennes par question ; bonne_station ignore les questions sans station."""
     if results.empty:
         return results
     return (

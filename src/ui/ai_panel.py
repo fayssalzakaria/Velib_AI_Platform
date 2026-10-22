@@ -1,9 +1,10 @@
 """
-ai_panel.py — Section Intelligence Artificielle de l'application.
+ai_panel.py — Section Intelligence Artificielle : quatre onglets sur le snapshot de la session.
 
-- 💬 Assistant : routage décidé par le code (règles), puis outils, puis synthèse LLM
-- 🤖 Agent : le LLM choisit lui-même ses outils, en plusieurs tours si besoin
-- 📊 Qualité & consommation : métriques de la session et banc d'évaluation comparatif
+- Assistant : le code route la question (règles), appelle les outils, le LLM rédige la synthèse
+- Agent : le LLM choisit lui-même ses outils, en plusieurs tours si besoin
+- Opérateur : graphe LangGraph superviseur / planificateur / vérificateur pour rééquilibrer le réseau
+- Qualité & consommation : métriques de la session et bancs d'évaluation
 """
 import pandas as pd
 import plotly.express as px
@@ -15,13 +16,14 @@ from src.ai.nlp_utils import detect_time_expression, extract_keywords, normalize
 from src.ai.vector_store import build_qdrant_index
 
 ASSISTANT, AGENT, OPERATOR = "Assistant", "Agent", "Opérateur"
-# Protège les crédits Claude d'une app publique : nombre de plans opérateur par session
+# App publique : on plafonne les plans opérateur par session pour protéger les crédits Claude
 OPERATOR_SESSION_QUOTA = 5
 
 
 # ---------------------------------------------------------------- ressources partagées
 
 def _get_qdrant_client_cached():
+    """Client Qdrant ouvert une fois par session ; None si Qdrant n'est pas configuré ou injoignable."""
     if "qdrant_client" not in st.session_state:
         with st.spinner("Connexion Qdrant Cloud..."):
             client, n = build_qdrant_index()
@@ -32,12 +34,13 @@ def _get_qdrant_client_cached():
 
 @st.cache_resource(ttl=3600, show_spinner=False)
 def _shared_rag_index():
-    """Index RAG (documents + embeddings) partagé entre toutes les sessions, reconstruit au plus 1x/h."""
+    """Index RAG (documents + vecteurs) partagé entre toutes les sessions, rechargé au plus une fois par heure."""
     from src.ai.rag import build_rag_index
     return build_rag_index()
 
 
 def _rag_documents():
+    """Documents RAG de la session ; None si le gold est illisible (l'historique se rabat alors sur Qdrant)."""
     if "rag_documents" not in st.session_state:
         try:
             with st.spinner("Chargement des profils de stations (gold)..."):
@@ -64,6 +67,7 @@ def _record(system: str, question: str, answer: str, trace) -> None:
 
 
 def _metrics_line(trace) -> None:
+    """Ligne sous chaque réponse : pertinence, appels LLM par fournisseur, tokens, latence et coût."""
     usage = trace.usage or {}
     score = trace.relevance_score
     color = "green" if (score or 0) >= 80 else "orange" if (score or 0) >= 50 else "red"
@@ -85,7 +89,7 @@ def _tool_results(results: dict) -> None:
             st.json(result)
 
 
-# ---------------------------------------------------------------- 💬 Assistant
+# ---------------------------------------------------------------- Assistant
 
 def _assistant_details(trace) -> None:
     with st.expander("Comment j'ai répondu"):
@@ -155,7 +159,7 @@ def _render_assistant(df) -> None:
         st.rerun()
 
 
-# ---------------------------------------------------------------- 🤖 Agent
+# ---------------------------------------------------------------- Agent
 
 def _agent_details(trace) -> None:
     with st.expander("Comment j'ai répondu"):
@@ -200,7 +204,7 @@ def _render_agent(df) -> None:
         st.rerun()
 
 
-# ---------------------------------------------------------------- 🧭 Opérateur (LangGraph)
+# ---------------------------------------------------------------- Opérateur (LangGraph)
 
 def _operator_details(trace) -> None:
     with st.expander("Comment le plan a été construit"):
@@ -237,6 +241,7 @@ def _render_operator(df) -> None:
             _metrics_line(trace)
             _operator_details(trace)
 
+    # Le quota ne protège que les crédits Claude : sans Claude, le planificateur passe par Groq
     used = st.session_state.get("operator_runs", 0)
     if claude_available() and used >= OPERATOR_SESSION_QUOTA:
         st.info(f"Limite de {OPERATOR_SESSION_QUOTA} plans par session atteinte (protection des crédits Claude).")
@@ -253,7 +258,7 @@ def _render_operator(df) -> None:
         st.rerun()
 
 
-# ---------------------------------------------------------------- 📊 Qualité & consommation
+# ---------------------------------------------------------------- Qualité & consommation
 
 def _summary_table(results: pd.DataFrame) -> pd.DataFrame:
     table = results.groupby("system").agg(
@@ -373,7 +378,7 @@ def _render_metrics(df) -> None:
 # ---------------------------------------------------------------- point d'entrée
 
 def render_ai_tabs() -> None:
-    """L'IA travaille toujours sur le snapshot complet de la session (les filtres d'affichage ne s'appliquent pas)."""
+    """Point d'entrée de la section IA. Elle travaille sur le snapshot complet : les filtres d'affichage ne s'appliquent pas."""
     from src.ui.ui import render_snapshot_bar
 
     st.subheader("Intelligence Artificielle")

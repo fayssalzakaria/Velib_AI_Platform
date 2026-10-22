@@ -1,12 +1,9 @@
 """
-embeddings.py — Modèle d'embeddings unique pour le RAG et Qdrant.
+embeddings.py — Modèle d'embeddings unique, partagé par le pipeline, le RAG et Qdrant.
 
-Par défaut : intfloat/multilingual-e5-small (gratuit, CPU, 384 dimensions,
-entraîné pour la recherche de documents, bon en français).
-Le modèle est chargé une seule fois par processus.
-
-Les modèles E5 attendent un préfixe : « query: » pour la question,
-« passage: » pour les documents indexés.
+Par défaut intfloat/multilingual-e5-small : gratuit, tourne sur CPU, 384 dimensions, bon en
+français. Chargé une seule fois par processus. Les modèles E5 attendent un préfixe
+(« query: » pour la question, « passage: » pour les documents), sinon la qualité chute.
 """
 import os
 import threading
@@ -31,14 +28,14 @@ def _load():
 
 
 def _model():
-    with _lock:  # un seul chargement, même si le préchargement est en cours
+    with _lock:  # si le préchargement est en cours, on l'attend au lieu de charger une 2e copie
         return _load()
 
 
 def warm_up() -> None:
     """
     Charge le modèle en arrière-plan (10 à 40 s à froid : import + poids) pour que la première
-    question de l'utilisateur ne paie pas ce temps. Sans effet si c'est déjà fait.
+    question ne paie pas ce temps. Sans effet si c'est déjà fait ou en cours.
     """
     if _load.cache_info().currsize or getattr(warm_up, "started", False):
         return
@@ -47,7 +44,7 @@ def warm_up() -> None:
 
 
 def embed_passages(texts: list[str]) -> np.ndarray:
-    """Embeddings normalisés des documents (le produit scalaire vaut la similarité cosinus)."""
+    """Embeddings normalisés des documents : le produit scalaire vaut alors la similarité cosinus."""
     if _uses_e5_prefixes():
         texts = [f"passage: {t}" for t in texts]
     return _model().encode(texts, normalize_embeddings=True, show_progress_bar=False, batch_size=64)

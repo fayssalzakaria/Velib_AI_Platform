@@ -1,5 +1,7 @@
 """
-prompts.py — Prompts système centralisés pour l'assistant IA Vélib
+prompts.py — Prompts système partagés de l'assistant Vélib.
+
+FINAL_SYNTHESIS_PROMPT sert à la synthèse finale et à sa reprise par Claude Opus (escalade).
 """
 
 

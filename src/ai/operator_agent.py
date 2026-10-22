@@ -27,12 +27,13 @@ from llm_client import CLAUDE_JUDGE_MODEL, call_complex_json, track_usage, verif
 from src.ai.toolkit import build_toolkit, run_tool
 
 MAX_CORRECTIONS = 2
-MAX_DISTANCE_KM = 2.0
-MAX_CANDIDATES = 25
+MAX_DISTANCE_KM = 2.0   # au-delà, un déplacement de vélos n'est plus réaliste pour une tournée
+MAX_CANDIDATES = 25     # par liste, pour garder un prompt du planificateur de taille raisonnable
 SPECIALISTS = ("temps_reel", "prevision", "historique")
 
 
 def _merge(left: dict | None, right: dict | None) -> dict:
+    """Réducteur de `facts` : les spécialistes tournent en parallèle, chacun ajoute sa clé."""
     return {**(left or {}), **(right or {})}
 
 
@@ -67,6 +68,7 @@ class OperatorTrace:
 # ---------------------------------------------------------------- données des candidats
 
 def _distance_km(a: dict, b: dict) -> float:
+    """Distance à vol d'oiseau (haversine) entre deux stations."""
     lat1, lon1, lat2, lon2 = map(math.radians, (a["lat"], a["lon"], b["lat"], b["lon"]))
     h = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
     return 6371 * 2 * math.asin(math.sqrt(h))
@@ -82,6 +84,7 @@ def _candidates(df: pd.DataFrame, forecast: pd.DataFrame | None, horizon: int) -
     """
     Stations à approvisionner (vides ou à risque d'être vides) et stations où prendre des vélos
     (pleines, presque pleines ou à risque d'être pleines), avec les paires proches.
+    Les clés préfixées par « _ » servent au vérificateur et ne sont pas envoyées au LLM.
     """
     snapshot = df.dropna(subset=["lat", "lon"])
     risk = {}
@@ -89,6 +92,7 @@ def _candidates(df: pd.DataFrame, forecast: pd.DataFrame | None, horizon: int) -
         at_h = forecast[forecast["horizon"] == horizon]
         risk = {r.name: (r.risk_empty, r.risk_full) for r in at_h.itertuples()}
 
+    # Sans prévision, les risques valent NaN : `x == x` est faux pour NaN, d'où les tests ci-dessous
     needs, offers = [], []
     for _, row in snapshot.iterrows():
         r_empty, r_full = risk.get(row["name"], (float("nan"), float("nan")))
@@ -96,7 +100,7 @@ def _candidates(df: pd.DataFrame, forecast: pd.DataFrame | None, horizon: int) -
         if row["is_empty"] or (r_empty == r_empty and r_empty >= 0.5) or row["numbikesavailable"] <= 1:
             needs.append(_station(row, risque_vide=None if r_empty != r_empty else round(float(r_empty), 2)))
         if row["is_full"] or (r_full == r_full and r_full >= 0.5) or row["bike_ratio"] >= 0.85:
-            if row["numbikesavailable"] >= 3:
+            if row["numbikesavailable"] >= 3:  # sinon pas assez de vélos pour justifier un passage
                 offers.append(_station(row, risque_pleine=None if r_full != r_full else round(float(r_full), 2)))
 
     needs = sorted(needs, key=lambda s: (-(s["risque_vide"] or 0), s["velos"]))[:MAX_CANDIDATES]
@@ -116,7 +120,11 @@ def _candidates(df: pd.DataFrame, forecast: pd.DataFrame | None, horizon: int) -
 # ---------------------------------------------------------------- vérificateur (déterministe)
 
 def verify_plan(plan: dict, candidates: dict) -> list[str]:
-    """Contrôle chaque action du plan contre les données. Renvoie la liste des problèmes."""
+    """
+    Contrôle chaque action du plan contre les données : stations connues et du bon côté,
+    nombre de vélos valide, distance, puis stocks et bornes cumulés sur tout le plan.
+    Renvoie la liste des problèmes (vide si le plan est valide).
+    """
     stations = candidates["_coords"]
     issues, taken, given = [], {}, {}
     for i, action in enumerate(plan.get("actions", []), 1):
@@ -200,6 +208,7 @@ _PLANNER_SYSTEM = (
 
 
 def build_graph(df: pd.DataFrame, rag_documents=None, qdrant_client=None):
+    """Graphe superviseur → spécialistes → planificateur ⇄ vérificateur (voir le schéma en tête)."""
     tools = build_toolkit(df, rag_documents, qdrant_client)
 
     def supervisor(state: OperatorState) -> dict:
@@ -209,6 +218,7 @@ def build_graph(df: pd.DataFrame, rag_documents=None, qdrant_client=None):
             system=_SUPERVISOR_SYSTEM, prompt=f"Demande de l'opérateur : {state['question']}",
             schema=_SUPERVISOR_SCHEMA, effort="low", max_tokens=4000, model=CLAUDE_JUDGE_MODEL,
         )
+        # Un horizon écrit dans la question (« dans 3 h ») prime sur celui choisi par le LLM
         target = parse_time_target(state["question"])
         horizon = target.get("hours_ahead") or decision.get("horizon") or 1
         specialists = [s for s in decision.get("specialists", []) if s in SPECIALISTS] or ["temps_reel"]
@@ -240,6 +250,7 @@ def build_graph(df: pd.DataFrame, rag_documents=None, qdrant_client=None):
 
     def planner(state: OperatorState) -> dict:
         forecast = state["facts"].get("prevision", {}).get("frame")
+        # Candidats calculés une seule fois : les corrections travaillent sur les mêmes données
         candidates = state["facts"].get("candidats") or _candidates(df, forecast, state["horizon"])
         context = {
             "demande": state["question"],
@@ -297,6 +308,7 @@ def keep_verified_actions(plan: dict, candidates: dict) -> tuple[dict, list[dict
 
 
 def format_plan(plan: dict, dropped: list[dict]) -> str:
+    """Plan vérifié en Markdown pour l'opérateur."""
     lines = [plan.get("resume", "")]
     for i, a in enumerate(plan.get("actions", []), 1):
         lines.append(f"{i}. **{a['velos']} vélos** : {a['depuis']} → {a['vers']} — {a['raison']}")
@@ -320,6 +332,7 @@ def run_operator(question: str, df: pd.DataFrame, rag_documents=None, qdrant_cli
             for update in build_graph(df, rag_documents, qdrant_client).stream(
                     {"question": question, "corrections": 0}, stream_mode="updates"):
                 for node, delta in update.items():
+                    # stream_mode="updates" ne donne que les deltas : on rejoue les réducteurs du graphe
                     for key, value in (delta or {}).items():
                         if key in ("facts",):
                             state[key] = _merge(state.get(key), value)

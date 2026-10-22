@@ -1,8 +1,8 @@
 """
-agent.py — Agent simple : le LLM (Groq) choisit lui-même ses outils par function calling,
-en plusieurs tours si besoin (par exemple l'état actuel d'une station, puis son historique).
+agent.py — Agent simple : le LLM (Groq) choisit ses outils par function calling, en plusieurs
+tours si besoin (par exemple l'état actuel d'une station, puis son historique).
 
-Les outils viennent de toolkit.py (définis une seule fois, partagés avec l'agent opérateur).
+Les outils viennent de toolkit.py, partagés avec l'agent opérateur.
 """
 import json
 import os
@@ -17,6 +17,7 @@ from src.ai.toolkit import build_toolkit, openai_schemas, run_tool
 
 @dataclass
 class AgentTrace:
+    """Ce que l'agent a fait pour une question : outils, prompt, tokens, pertinence, latence."""
     question: str = ""
     tools_called: list = field(default_factory=list)
     tool_results: dict = field(default_factory=dict)
@@ -33,6 +34,7 @@ class AgentTrace:
 
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+# Borne le coût et la latence : au-delà, le LLM doit répondre avec ce qu'il a
 MAX_TOOL_ROUNDS = 3
 
 AGENT_SYSTEM_PROMPT = (
@@ -58,8 +60,9 @@ def _format_messages(messages: list[dict]) -> str:
 
 def _agent_loop(question: str, tools, trace: AgentTrace) -> tuple[str, str]:
     """
-    Boucle agentique : le LLM appelle des outils, lit les résultats et peut en rappeler
-    d'autres, jusqu'à MAX_TOOL_ROUNDS tours. Renvoie (réponse, données des outils).
+    Le LLM appelle des outils, lit les résultats et peut en rappeler d'autres, jusqu'à
+    MAX_TOOL_ROUNDS tours. Renvoie (réponse, données des outils) ; ces données servent
+    ensuite de contexte au juge de pertinence.
     """
     schemas = openai_schemas(tools)
     messages = [
@@ -82,7 +85,7 @@ def _agent_loop(question: str, tools, trace: AgentTrace) -> tuple[str, str]:
             try:
                 args = json.loads(tool_call["function"].get("arguments") or "{}")
             except json.JSONDecodeError:
-                args = {}
+                args = {}  # JSON mal formé : run_tool renverra au LLM une erreur qu'il peut corriger
 
             result = run_tool(tools, name, args)
             trace.tools_called.append(name)
@@ -91,13 +94,14 @@ def _agent_loop(question: str, tools, trace: AgentTrace) -> tuple[str, str]:
             all_tool_data.append(f"[{name}] {result}")
             messages.append({"role": "tool", "tool_call_id": tool_call["id"], "content": result})
 
-    # Nombre de tours atteint : réponse finale sans nouvel outil
+    # Plafond atteint : dernier appel sans outils pour forcer une réponse
     trace.prompt_sent = _format_messages(messages)
     message = call_llm(messages, max_tokens=1000)["choices"][0]["message"]
     return message.get("content") or "Aucune réponse.", "\n".join(all_tool_data)
 
 
 def run_agent(question: str, df: pd.DataFrame, qdrant_client=None, rag_documents=None) -> tuple[str, AgentTrace]:
+    """Point d'entrée : réponse de l'agent et trace complète (jamais d'exception, l'erreur devient la réponse)."""
     trace = AgentTrace(question=question)
 
     if not GROQ_API_KEY:

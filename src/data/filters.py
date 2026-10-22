@@ -1,3 +1,8 @@
+"""
+filters.py — Recherche de stations par nom et filtres d'affichage du mode Temps réel.
+
+Partagé par l'interface et l'IA, pour qu'une station soit retrouvée de la même façon partout.
+"""
 import math
 import re
 import unicodedata
@@ -68,6 +73,7 @@ def apply_filters(
     filtre_etat: str,
     filtre_min_velos: int,
 ) -> pd.DataFrame:
+    """Filtres de la barre latérale (type de vélo, état, minimum de vélos) ; les libellés sont ceux du selectbox."""
     df_filtered = df.copy()
 
     if filtre_type == "Mecaniques uniquement":
@@ -86,7 +92,7 @@ def apply_filters(
 
     df_filtered = df_filtered[df_filtered["numbikesavailable"] >= filtre_min_velos]
 
-    # Deduplique — garde la ligne la plus recente par station
+    # Si le DataFrame couvre plusieurs snapshots, on ne garde que la ligne la plus récente par station
     if "snapshot_id" in df_filtered.columns:
         df_filtered = (
             df_filtered

@@ -23,6 +23,7 @@ class ProfileRetriever(BaseRetriever):
     use_rerank: bool = False
 
     def _get_relevant_documents(self, query: str, *, run_manager: CallbackManagerForRetrieverRun) -> list[Document]:
+        # Les techniques réellement utilisées sont copiées dans chaque document, pour la trace
         from src.ai.rag import hybrid_search
 
         docs, trace = hybrid_search(query, self.documents, top_k=self.k, use_hyde=self.use_hyde,

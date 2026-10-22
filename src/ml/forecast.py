@@ -1,9 +1,10 @@
 """
-forecast.py — Prévisions de 1 à 6 heures (côté application et agent) :
-risque d'être vide, risque d'être pleine, nombre de vélos avec un intervalle de 80 %.
+forecast.py — Prévisions de 1 à 6 heures, côté application et agents : risque d'être vide,
+risque d'être pleine, nombre de vélos avec un intervalle de 80 % (quantiles 10 et 90).
 
-Les modèles publiés sont lus dans le registre du lakehouse ; les features du dernier snapshot du
-silver sont calculées par src/ml/features.py, exactement comme à l'entraînement.
+Les modèles publiés (entraînés à la main par pipeline/forecast.py) sont lus dans le registre du
+lakehouse ; les features du dernier snapshot sont calculées par src/ml/features.py, comme à
+l'entraînement.
 """
 import time
 
@@ -16,8 +17,9 @@ from src.ml.storage import model_uri, read_json, read_text
 
 MODEL_NAME = "forecast"
 MODEL_FILES = {"empty": ["model"], "full": ["model"], "bikes": ["q10", "q50", "q90"]}
+# Le silver n'avance qu'une fois par heure : inutile de recalculer à chaque question
 _CACHE_SECONDS = 600
-_cache: dict = {}
+_cache: dict = {}  # prédictions et boosters, partagés par toutes les sessions du processus
 
 
 def model_status() -> dict:
@@ -29,6 +31,7 @@ def model_status() -> dict:
 
 
 def _booster(version: str, family: str, key: str):
+    """Modèle LightGBM lu une fois par version ; une nouvelle publication change la clé de cache."""
     import lightgbm as lgb
 
     cache_key = ("booster", version, family, key)
@@ -38,6 +41,7 @@ def _booster(version: str, family: str, key: str):
 
 
 def _snapshot(ts) -> pd.DataFrame:
+    """Snapshot silver à l'instant exact `ts` ; le filtre sur date limite les partitions lues."""
     columns = ", ".join(SILVER_COLUMNS)
     return lake.query(
         f"SELECT {columns} FROM {lake._silver()} WHERE date >= ? AND ingested_at = ?",
@@ -46,6 +50,7 @@ def _snapshot(ts) -> pd.DataFrame:
 
 
 def _compute_predictions() -> tuple[pd.DataFrame | None, dict]:
+    """Toutes les stations × tous les horizons, à partir du dernier snapshot du silver."""
     published = read_json(model_uri(MODEL_NAME, "latest.json"))
     if not published:
         return None, {"reason": "Aucun modèle publié pour l'instant."}
@@ -57,6 +62,7 @@ def _compute_predictions() -> tuple[pd.DataFrame | None, dict]:
 
     current = _snapshot(ts)
     lag1, lag2 = _snapshot(ts - pd.Timedelta(hours=1)), _snapshot(ts - pd.Timedelta(hours=2))
+    # Habitudes : seulement les heures de la journée visées par les horizons, pour alléger la requête
     target_hours = sorted({int((ts + pd.Timedelta(hours=h)).tz_convert(PARIS_TZ).hour) for h in HORIZONS})
     hour_stats = lake.query(
         f"""SELECT station_id, hour, count(*) AS past_n, sum(is_empty::int) AS past_empty,
@@ -73,12 +79,14 @@ def _compute_predictions() -> tuple[pd.DataFrame | None, dict]:
     frame = serving_frame(current, lag1, lag2, hour_stats,
                           weather if not weather.empty else None, school if not school.empty else None)
 
+    # Seules les familles qui ont battu leurs baselines sont publiées ; les autres restent NaN
     version, promoted = published["version"], set(published["promoted"])
     X = frame[FEATURES]
     frame["risk_empty"] = _booster(version, "empty", "model").predict(X) if "empty" in promoted else np.nan
     frame["risk_full"] = _booster(version, "full", "model").predict(X) if "full" in promoted else np.nan
     if "bikes" in promoted:
         q10, q50, q90 = (np.clip(_booster(version, "bikes", q).predict(X), 0, None) for q in ("q10", "q50", "q90"))
+        # Les quantiles sont appris séparément et peuvent se croiser : on remet q10 <= q50 <= q90 <= capacité
         frame["bikes_q50"] = q50
         frame["bikes_q10"] = np.minimum(q10, q50)
         frame["bikes_q90"] = np.minimum(np.maximum(q90, q50), frame["capacity"])
@@ -90,7 +98,10 @@ def _compute_predictions() -> tuple[pd.DataFrame | None, dict]:
 
 
 def predict() -> tuple[pd.DataFrame | None, dict]:
-    """Prévisions de tous les horizons pour le dernier snapshot (mises en cache 10 minutes)."""
+    """
+    Prévisions de tous les horizons pour le dernier snapshot, en cache 10 minutes.
+    Les échecs sont aussi mis en cache, pour ne pas réinterroger un lakehouse en panne à chaque question.
+    """
     cached = _cache.get("predictions")
     if cached and time.time() - cached[0] < _CACHE_SECONDS:
         return cached[1]
@@ -103,14 +114,18 @@ def predict() -> tuple[pd.DataFrame | None, dict]:
 
 
 def horizon_for(target_hour: int, snapshot_at: pd.Timestamp) -> int:
-    """« À 18h » → nombre d'heures après le dernier snapshot (le lendemain si l'heure est passée)."""
+    """
+    « À 18h » → nombre d'heures après le dernier snapshot (le lendemain si l'heure est passée,
+    ce qui sort alors des horizons et sera refusé par l'appelant).
+    """
     return (target_hour - snapshot_at.hour) % 24 or 24
 
 
 def forecast_for_station(station_query: str, hours_ahead: int | None = None, at_hour: int | None = None) -> dict:
     """
-    Utilisé par l'IA : pour les stations qui correspondent à la recherche, risque d'être vide ou
-    pleine et nombre de vélos attendu (avec intervalle), à un horizon donné ou à tous.
+    Outil de prévision des agents : pour les stations qui correspondent à la recherche, risque
+    d'être vide ou pleine et vélos attendus, à un horizon donné ou à tous. Sans nom de station,
+    renvoie les stations les plus à risque d'être vides.
     """
     from src.data.filters import search_stations
 
