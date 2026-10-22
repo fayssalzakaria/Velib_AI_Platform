@@ -54,6 +54,7 @@ class OperatorTrace:
     question: str
     steps: list = field(default_factory=list)
     plan: dict = field(default_factory=dict)
+    dropped: list = field(default_factory=list)  # actions écartées par le vérificateur
     issues: list = field(default_factory=list)
     corrections: int = 0
     models: list = field(default_factory=list)
@@ -347,6 +348,7 @@ def run_operator(question: str, df: pd.DataFrame, rag_documents=None, qdrant_cli
             candidates = state.get("facts", {}).get("candidats", {})
             trace.issues = state.get("issues", [])
             trace.plan, dropped = keep_verified_actions(state.get("plan", {}), candidates)
+            trace.dropped = dropped
             trace.corrections, trace.models = state.get("corrections", 0), sorted(set(state.get("models", [])))
             trace.candidates = {k: v for k, v in candidates.items() if not k.startswith("_")}
             trace.tools_called = state.get("specialists", [])

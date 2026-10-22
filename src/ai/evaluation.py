@@ -111,9 +111,7 @@ def run_operator_benchmark(df, rag_documents=None, qdrant_client=None, questions
     rows = []
     for question in questions:
         answer, trace = run_operator(question, df, rag_documents, qdrant_client)
-        # Approximation : format_plan ne mentionne « écartée » qu'une fois, quel que soit
-        # le nombre d'actions rejetées ; le taux d'actions valides est donc surestimé.
-        proposed = len(trace.plan.get("actions", [])) + answer.count("écartée")
+        proposed = len(trace.plan.get("actions", [])) + len(trace.dropped)
         rows.append({
             "system": "Opérateur",
             "question": question,
