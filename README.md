@@ -104,7 +104,7 @@ Trois questions, un modèle LightGBM par question, l'horizon (1 à 6 h) étant u
 |---|---|---|
 | La station sera-t-elle **vide** à t + h ? | classification | AUC, précision moyenne, Brier, précision sur les 20 stations les plus à risque |
 | La station sera-t-elle **pleine** à t + h ? | classification | idem |
-| **Combien de vélos** à t + h ? | régression quantile (10 %, 50 %, 90 %) : valeur + intervalle de 80 % | erreur moyenne, couverture de l'intervalle |
+| **Combien de vélos** à t + h ? | régression quantile (10 %, 50 %, 90 %) **de la variation** (vélos à t + h − vélos à t), remise en niveau : valeur + intervalle de 80 %. Prédire une variation nulle redonne la persistance, que le modèle doit donc corriger pour être publié | erreur moyenne, couverture de l'intervalle |
 
 | Étape | Choix |
 |---|---|
@@ -245,6 +245,7 @@ GitHub Actions utilise le secret `AWS_ROLE_ARN` (OIDC) et les variables `S3_BUCK
 - Les profils historiques sont recalculés chaque jour : ils ont jusqu'à un jour de retard.
 - Le modèle de prévision a besoin de plusieurs jours de collecte pour apprendre les habitudes de chaque jour de la semaine.
 - Les prévisions partent du dernier snapshot horaire, pas de l'instant exact de la question.
+- Le nombre de vélos reste difficile à prévoir à quelques heures : la persistance est une baseline très forte, et le modèle « vélos » n'est servi que lorsqu'il la bat (les questions vide / pleine, elles, la battent nettement).
 - Champion / challenger compare les modèles sur la période de test la plus récente : sur peu de jours, la décision reste sensible au bruit.
 - L'agent opérateur estime les distances à vol d'oiseau (2 km maximum), sans itinéraire réel.
 - La météo de l'heure prédite est une prévision au moment de la prédiction, mais une valeur observée à l'entraînement : un léger écart est possible.
