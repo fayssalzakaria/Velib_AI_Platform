@@ -118,7 +118,12 @@ def _compute_predictions(use_stored: bool = True) -> tuple[pd.DataFrame | None, 
     frame["risk_empty"] = _booster(version, "empty", "model").predict(X) if "empty" in promoted else np.nan
     frame["risk_full"] = _booster(version, "full", "model").predict(X) if "full" in promoted else np.nan
     if "bikes" in promoted:
-        q10, q50, q90 = (np.clip(_booster(version, "bikes", q).predict(X), 0, None) for q in ("q10", "q50", "q90"))
+        # Modèles récents : variation à ajouter aux vélos actuels ; anciens : niveau directement
+        delta = published.get("bikes_target") == "delta"
+        q10, q50, q90 = (
+            np.clip(frame["bikes"].to_numpy() + raw if delta else raw, 0, frame["capacity"].to_numpy())
+            for raw in (_booster(version, "bikes", q).predict(X) for q in ("q10", "q50", "q90"))
+        )
         # Les quantiles sont appris séparément et peuvent se croiser : on remet q10 <= q50 <= q90 <= capacité
         frame["bikes_q50"] = q50
         frame["bikes_q10"] = np.minimum(q10, q50)

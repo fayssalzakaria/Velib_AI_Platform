@@ -210,7 +210,10 @@ def render_forecast() -> None:
     # Une station déjà vide (ou pleine) n'est pas une alerte : on classe celles qui risquent de le devenir
     candidates = at_h[at_h[spec["now"]] == 0]
     c1, c2, c3 = st.columns(3)
-    c1.metric("Stations à risque (> 50 %)", int((candidates[spec["risk"]] > 0.5).sum()))
+    # Les risques sont faibles (une station fournie se vide rarement en quelques heures) : un seuil à
+    # 50 % donnerait toujours 0. La somme des probabilités est le nombre de stations attendu.
+    c1.metric(f"Stations qui devraient devenir {question}s", f"≈ {candidates[spec['risk']].sum():.0f}",
+              help="Somme des probabilités des stations qui ne le sont pas encore.")
     c2.metric(f"Déjà {question}s au dernier snapshot", int(at_h[spec["now"]].sum()))
     c3.metric("Vélos attendus sur le réseau",
               "—" if at_h["bikes_q50"].isna().all() else f"{at_h['bikes_q50'].sum():,.0f}")

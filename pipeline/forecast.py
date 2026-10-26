@@ -5,6 +5,8 @@ Trois questions, un modèle par question (l'horizon est une feature) :
 - vide  : la station sera-t-elle vide à t + h ?          classification
 - plein : la station sera-t-elle pleine à t + h ?        classification
 - vélos : combien de vélos à t + h ? (quantiles 10/50/90) régression quantile → valeur + intervalle
+          Le modèle apprend la VARIATION (vélos à t + h − vélos à t) : il part de la persistance
+          (« rien ne change ») et la corrige, au lieu de deviner le niveau à partir de zéro.
 
 1. features à partir de tout le silver (src/ml/features.py, partagé avec la prédiction)
 2. découpage dans le temps : entraînement < validation < test
@@ -170,18 +172,30 @@ def _train_classifier(name, train, valid, test, features, profile_col):
             "base_rate": round(base_rate, 4), "best_iteration": int(model.best_iteration_ or 0)}
 
 
+BIKES_DELTA = "bikes_delta_target"
+
+
+def bikes_from_delta(frame: pd.DataFrame, delta: np.ndarray) -> np.ndarray:
+    """Vélos prévus = vélos maintenant + variation prévue, bornés entre 0 et la capacité."""
+    return np.clip(frame["bikes"].to_numpy() + delta, 0, frame["capacity"].to_numpy())
+
+
 def _train_bikes(train, valid, test, features):
-    """Nombre de vélos : trois quantiles (intervalle de 80 %) + baselines sur la médiane."""
+    """
+    Nombre de vélos : trois quantiles de la variation (intervalle de 80 %), remis en niveau
+    pour l'évaluation. Prédire une variation nulle redonne exactement la persistance.
+    """
     import lightgbm as lgb
 
     from src.ml.features import TARGETS
 
     target = TARGETS["bikes"]
+    train, valid = (d.assign(**{BIKES_DELTA: d[target] - d["bikes"]}) for d in (train, valid))
     models = {f"q{int(q * 100)}": _fit(lgb.LGBMRegressor(objective="quantile", alpha=q, **BASE_PARAMS),
-                                       train, valid, target, features) for q in QUANTILES}
+                                       train, valid, BIKES_DELTA, features) for q in QUANTILES}
 
     def model_metrics(d):
-        low, med, high = (np.clip(models[k].predict(d[features]), 0, None) for k in ("q10", "q50", "q90"))
+        low, med, high = (bikes_from_delta(d, models[k].predict(d[features])) for k in ("q10", "q50", "q90"))
         return _regression_metrics(d[target].to_numpy(), med, np.minimum(low, med), np.maximum(high, med))
 
     evaluation = {
@@ -220,7 +234,8 @@ def _champion_scores(test: pd.DataFrame, features: list[str]) -> dict | None:
     for family in champion.get("promoted", []):
         y = test[TARGETS[family]].to_numpy()
         if family == "bikes":
-            median = np.clip(booster("bikes", "q50").predict(test[features]), 0, None)
+            raw = booster("bikes", "q50").predict(test[features])
+            median = bikes_from_delta(test, raw) if champion.get("bikes_target") == "delta" else np.clip(raw, 0, None)
             scores[family] = {"mae": round(float(np.mean(np.abs(y - median))), 3)}
         elif y.min() != y.max():  # AUC indéfinie avec une seule classe : pas de comparaison
             scores[family] = {"auc": round(float(roc_auc_score(y, booster(family, "model").predict(test[features]))), 4)}
@@ -329,6 +344,7 @@ def train_forecast(silver: pd.DataFrame | None = None, weather: pd.DataFrame | N
         "rows": {"train": len(train), "valid": len(valid), "test": len(test)},
         "test_period": [test["ts"].min(), test["ts"].max()],
         "features": FEATURES,
+        "bikes_target": "delta",  # le modèle vélos prédit une variation (voir _train_bikes)
         "families": {
             family: {k: v for k, v in result.items() if k != "models"} | {"files": sorted(result["models"])}
             for family, result in results.items()
