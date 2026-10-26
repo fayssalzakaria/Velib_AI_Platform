@@ -125,4 +125,6 @@ def render_mlops(source: str | None = None) -> None:
         st.markdown("**Historique des entraînements**")
         _history(registry["runs"])
         st.caption(RULES)
-        _launch_form()
+        # Bouton seulement s'il est configuré : sinon le réentraînement reste entièrement automatique
+        if os.environ.get("ADMIN_PASSWORD") and os.environ.get("GITHUB_TRAIN_TOKEN"):
+            _launch_form()
