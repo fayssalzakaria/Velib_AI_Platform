@@ -6,12 +6,12 @@ Plateforme Data & IA sur le réseau Vélib' de Paris (~1 500 stations) :
 
 - un **pipeline** collecte toutes les heures l'état du réseau et l'historise dans un **lakehouse S3** (bronze / silver / gold) ;
 - un **dashboard Streamlit** affiche le temps réel et l'historique ;
-- des **modèles LightGBM** prévoient, de 1 à 6 heures à l'avance, les stations vides, les stations pleines et le nombre de vélos ;
+- des **modèles LightGBM** prévoient, de 1 à 6 heures à l'avance, les stations vides, les stations pleines et le nombre de vélos, dans un **cycle MLOps** complet (réentraînement sur règles, champion / challenger, serving batch, monitoring) ;
 - un **assistant**, un **agent** et un **agent opérateur multi-agents (LangGraph)** répondent en langage naturel ou proposent des rééquilibrages, avec des **métriques de qualité et de consommation** pour chaque réponse.
 
 > Le temps réel dit où sont les vélos ; l'historique dit pourquoi ils n'y sont pas.
 
-- Application : [velib-data-pipeline.streamlit.app](https://velib-data-pipeline-e8bwwhyt8nevmwfcbfq5sa.streamlit.app/)
+- Application : [velib-data-pipeline.streamlit.app](https://velib-data-pipeline-e8bwwhyt8nevmwfcbfq5sa.streamlit.app/) (si elle est en veille, cliquer sur « Yes, get this app back up » : elle redémarre en ~30 s)
 - 🎬 **Vidéo de présentation** : [Video_app_velib.mp4](Video_app_velib.mp4) (temps réel, historique, assistant, agent, agent opérateur multi-agents, métriques de qualité et de coût)
 
 ---
@@ -63,8 +63,9 @@ Streamlit Cloud (DuckDB en lecture seule)
 | `dbt build` | chaque jour | modèles gold et tests qualité (unicité, plages de valeurs, valeurs acceptées) |
 | `embed` | chaque jour | encode les profils de stations (multilingual-e5) → gold + Qdrant |
 | `external` | chaque jour | météo horaire (Open-Meteo) et vacances scolaires (API Éducation nationale) |
-| `forecast` | **à la main** | entraîne les modèles de prévision (vide, pleine, vélos) ; chacun publié seulement s'il bat les baselines |
 | `monitor` | chaque jour | compare les prévisions enregistrées à la réalité : AUC par jour, calibration, dérive |
+| `retrain` | chaque jour, après `monitor` | réentraîne **seulement si une règle MLOps le demande** (voir plus bas) |
+| `forecast` | à la demande | entraînement manuel : DAG Airflow, workflow `train` ou bouton du panneau MLOps de l'app |
 
 **Deux orchestrateurs, sans doublons ni pertes :**
 
@@ -109,12 +110,34 @@ Trois questions, un modèle LightGBM par question, l'horizon (1 à 6 h) étant u
 |---|---|
 | Features | état actuel, variations sur 1 h et 2 h, heure et jour visés, habitudes de la station à l'heure visée (taux de vide, de plein, vélos moyens, calculés uniquement sur le passé), météo de l'heure visée, jours fériés et vacances scolaires |
 | Évaluation | découpage temporel entraînement < validation < test, métriques **par horizon**, comparées à deux baselines : persistance (« comme maintenant ») et habitudes de la station |
-| Publication | registre de modèles versionné dans S3 (`lake/models/forecast/`) ; chaque question est publiée seulement si son modèle bat les deux baselines |
-| Entraînement | lancé à la main (DAG Airflow `velib_train_forecast` ou `python -m pipeline.run forecast`), avec un historique minimal à choisir (7 jours par défaut) et une option de test qui enregistre les métriques sans servir les modèles |
+| Publication | registre de modèles versionné dans S3 (`lake/models/forecast/`) ; une question n'est publiée que si son modèle bat les deux baselines **et** le modèle en production |
 | Garde-fous | mêmes features à l'entraînement et en prédiction (`src/ml/features.py`), vérifié par les tests pour chaque horizon |
 | Monitoring | à chaque collecte, les prévisions des 6 horizons sont enregistrées avec leurs features ; chaque jour : AUC vide/pleine, erreur sur les vélos et couverture **par jour et par horizon**, calibration, dérive des features (PSI) |
 
-Dans l'app (mode Temps réel) : choix de l'horizon et de la question, stations à réapprovisionner ou à délester, carte du risque, courbe des vélos attendus d'une station avec son intervalle, fiche des modèles et performance en production. L'IA dispose d'un outil `forecast_station` qui comprend « dans 3 h » ou « à 18h ».
+Dans l'app (mode Temps réel) : choix de l'horizon et de la question, stations à réapprovisionner ou à délester, carte du risque, courbe des vélos attendus d'une station avec son intervalle, fiche des modèles, performance en production et panneau MLOps. L'IA dispose d'un outil `forecast_station` qui comprend « dans 3 h » ou « à 18h ».
+
+### MLOps : le cycle de vie du modèle
+
+```text
+ collecte horaire ──► prévisions calculées et enregistrées (batch) ──► servies par l'app et l'IA
+        │                                                                      │
+        ▼                                                                      ▼
+ job quotidien ──► monitoring (AUC réelle, calibration, dérive) ──► règles de réentraînement
+                                                                       │
+     entraînement à la demande (Airflow, workflow train, bouton) ──────┤
+                                                                       ▼
+                                  challenger ── bat les baselines ET le champion ? ──► publié
+                                                                    sinon ──► champion conservé
+```
+
+| Étape | Mise en œuvre |
+|---|---|
+| **Réentraînement automatique** | chaque jour après le monitoring (`pipeline/mlops.py`), si : aucun modèle en production · modèle de plus de 7 jours · dérive d'une feature (PSI > 0,25) · AUC « vide » à 1 h en production inférieure de plus de 0,05 à celle du test. La raison est tracée |
+| **Champion / challenger** | le modèle en production rejoue la période de test du nouveau : le challenger n'est publié que s'il ne perd sur aucune question servie et gagne sur au moins une. Un réentraînement automatique ne peut donc pas dégrader la production |
+| **Registre** | `lake/models/forecast/<version>/` (modèles + `metrics.json` : métriques, baselines, champion, décision, distribution de référence) · `latest.json` (modèle servi) · `history.json` (chaque entraînement : déclencheur, raison, décision) |
+| **Serving batch** | les prévisions de toutes les stations × 6 horizons sont calculées à chaque collecte et enregistrées (`lake/monitoring/predictions`) ; l'app sert ces mêmes chiffres, ceux que le monitoring juge. Calcul à la demande en secours |
+| **Monitoring** | AUC vide/pleine, erreur et couverture des vélos par jour, horizon et version ; calibration ; dérive des features (PSI) |
+| **Pilotage** | panneau « MLOps » de l'app : modèle en production, historique des entraînements, bouton « Lancer un entraînement » (mot de passe administrateur) qui déclenche le workflow GitHub `train`. Rien n'est entraîné dans l'app |
 
 ### IA
 
@@ -158,10 +181,10 @@ src/
   ai/                   toolkit (outils LangChain), retriever, assistant, agent, operator_agent (LangGraph), router, rag, evaluation
   ml/                   features (partagées entraînement/prédiction), prédiction, registre de modèles
   data/                 lake.py (DuckDB → S3), data_loader.py (API), filters.py
-pipeline/               ingest, transform, lake (Delta), embed, forecast (LightGBM), external, monitoring, backfill, control
+pipeline/               ingest, transform, lake (Delta), embed, forecast (LightGBM, champion/challenger), mlops (règles de réentraînement), external, monitoring, backfill, control
 dbt/                    modèles gold et tests
 airflow/                DAGs Airflow 3 + Docker Compose
-.github/workflows/      ingest-fallback, daily-fallback, ci
+.github/workflows/      ingest-fallback, daily-fallback, train (entraînement à la demande), ci
 tests/                  pytest (pipeline, prévision, gateway LLM, outils, agent opérateur)
 ```
 
@@ -188,12 +211,13 @@ cd airflow && cp env.example .env   # LAKE_ROOT, clés AWS, QDRANT_*
 docker compose up -d --build        # http://localhost:8080 (ou AIRFLOW_PORT)
 ```
 
-Entraîner les modèles de prévision, quand on le décide :
+Modèles de prévision (le job quotidien s'en charge seul ; à la demande) :
 
 ```bash
-# Airflow : DAG velib_train_forecast → Trigger (paramètres min_days et publish)
-python -m pipeline.run forecast                            # 7 jours d'historique minimum, publie
+python -m pipeline.run retrain                             # réentraîne seulement si une règle MLOps le demande
+python -m pipeline.run forecast --reason "nouvelles features"   # entraînement à la demande (champion / challenger)
 python -m pipeline.run forecast --min-days 2 --no-publish  # test : métriques sans servir les modèles
+# ou : DAG Airflow velib_train_forecast, workflow GitHub « train », bouton du panneau MLOps de l'app
 ```
 
 ### Variables d'environnement
@@ -206,6 +230,8 @@ python -m pipeline.run forecast --min-days 2 --no-publish  # test : métriques s
 | `ANTHROPIC_API_KEY`, `CLAUDE_MONTHLY_BUDGET_USD` | Claude (optionnel) : juge, agent opérateur, reprise des réponses faibles ; plafond mensuel (80 $ par défaut) |
 | `QDRANT_URL`, `QDRANT_API_KEY` | recherche sémantique (optionnel) |
 | `EMBEDDING_MODEL` | modèle d'embeddings (par défaut `intfloat/multilingual-e5-small`) |
+| `ADMIN_PASSWORD`, `GITHUB_TRAIN_TOKEN`, `GITHUB_REPO` | bouton d'entraînement de l'app (optionnel) : mot de passe, jeton GitHub limité au repo (droit « Actions : écriture »), repo cible |
+| `FORECAST_MIN_DAYS`, `FORECAST_MAX_AGE_DAYS` | historique minimal pour entraîner (7) et âge maximal du modèle en production (7 jours) |
 
 GitHub Actions utilise le secret `AWS_ROLE_ARN` (OIDC) et les variables `S3_BUCKET` et `AWS_REGION`.
 
@@ -218,5 +244,7 @@ GitHub Actions utilise le secret `AWS_ROLE_ARN` (OIDC) et les variables `S3_BUCK
 - L'API ne donne que l'état courant : une heure non collectée (PC éteint et GitHub en retard) est perdue.
 - Les profils historiques sont recalculés chaque jour : ils ont jusqu'à un jour de retard.
 - Le modèle de prévision a besoin de plusieurs jours de collecte pour apprendre les habitudes de chaque jour de la semaine.
+- Les prévisions partent du dernier snapshot horaire, pas de l'instant exact de la question.
+- Champion / challenger compare les modèles sur la période de test la plus récente : sur peu de jours, la décision reste sensible au bruit.
 - L'agent opérateur estime les distances à vol d'oiseau (2 km maximum), sans itinéraire réel.
 - La météo de l'heure prédite est une prévision au moment de la prédiction, mais une valeur observée à l'entraînement : un léger écart est possible.
