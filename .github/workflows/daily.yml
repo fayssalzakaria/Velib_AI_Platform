@@ -96,6 +96,10 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         run: python -m pipeline.run monitor
 
+      - name: Réentraînement si une règle MLOps le demande (champion / challenger)
+        if: steps.check.outputs.skip != 'true'
+        run: python -m pipeline.run retrain
+
       - name: Marqueur de fin
         if: steps.check.outputs.skip != 'true'
         run: python -m pipeline.control mark-done daily

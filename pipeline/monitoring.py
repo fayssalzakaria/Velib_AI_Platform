@@ -44,7 +44,7 @@ def log_predictions() -> int:
     from src.ml.features import FEATURES
 
     forecast._cache.clear()
-    predictions, info = forecast._compute_predictions()
+    predictions, info = forecast._compute_predictions(use_stored=False)
     if predictions is None:
         logger.info(f"Pas de prévision à enregistrer : {info.get('reason')}")
         return 0

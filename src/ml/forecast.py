@@ -2,9 +2,11 @@
 forecast.py — Prévisions de 1 à 6 heures, côté application et agents : risque d'être vide,
 risque d'être pleine, nombre de vélos avec un intervalle de 80 % (quantiles 10 et 90).
 
-Les modèles publiés (entraînés à la main par pipeline/forecast.py) sont lus dans le registre du
-lakehouse ; les features du dernier snapshot sont calculées par src/ml/features.py, comme à
-l'entraînement.
+Les modèles publiés (pipeline/forecast.py) sont lus dans le registre du lakehouse.
+Serving en batch d'abord : à chaque collecte horaire, le pipeline calcule et enregistre les
+prévisions (pipeline/monitoring.py) ; l'app sert ces mêmes chiffres, ceux que le monitoring juge.
+Si elles manquent (modèle tout juste publié, collecte en échec), calcul à la demande avec les
+features de src/ml/features.py, comme à l'entraînement.
 """
 import time
 
@@ -49,8 +51,33 @@ def _snapshot(ts) -> pd.DataFrame:
     )
 
 
-def _compute_predictions() -> tuple[pd.DataFrame | None, dict]:
-    """Toutes les stations × tous les horizons, à partir du dernier snapshot du silver."""
+def _stored_predictions(ts, version: str, current: pd.DataFrame) -> pd.DataFrame | None:
+    """
+    Prévisions enregistrées à la collecte pour ce snapshot et cette version, complétées du nom et
+    de la position des stations. None si elles manquent ou sont incomplètes.
+    """
+    uri = f"{lake.lake_root()}/monitoring/predictions"
+    try:
+        rows = lake.query(
+            f"SELECT * FROM delta_scan('{uri}') WHERE date = ? AND snapshot_at = ? AND model_version = ?",
+            [ts.tz_convert(PARIS_TZ).strftime("%Y-%m-%d"), ts.to_pydatetime(), version],
+        )
+    except Exception:  # table pas encore créée (aucun modèle n'a encore servi)
+        return None
+    if len(rows) < 0.9 * len(current) * len(HORIZONS):
+        return None
+    rows = rows.rename(columns={"predicted_for": "ts_target"})
+    rows["ts_target"] = pd.to_datetime(rows["ts_target"], utc=True)
+    rows["station_id"] = rows["station_id"].astype(str)
+    meta = current[["station_id", "name", "lat", "lon"]].assign(station_id=lambda d: d["station_id"].astype(str))
+    return rows.merge(meta, on="station_id", how="left").reset_index(drop=True)
+
+
+def _compute_predictions(use_stored: bool = True) -> tuple[pd.DataFrame | None, dict]:
+    """
+    Toutes les stations × tous les horizons, à partir du dernier snapshot du silver.
+    use_stored=False force le calcul (c'est le cas du pipeline, qui produit les prévisions batch).
+    """
     published = read_json(model_uri(MODEL_NAME, "latest.json"))
     if not published:
         return None, {"reason": "Aucun modèle publié pour l'instant."}
@@ -59,8 +86,14 @@ def _compute_predictions() -> tuple[pd.DataFrame | None, dict]:
     if last.empty or pd.isna(last.loc[0, "ts"]):
         return None, {"reason": "Lakehouse vide ou inaccessible."}
     ts = pd.Timestamp(last.loc[0, "ts"]).tz_convert("UTC")
+    info = {"snapshot_at": ts.tz_convert(PARIS_TZ), "model": published, "horizons": list(HORIZONS)}
 
     current = _snapshot(ts)
+    if use_stored:
+        stored = _stored_predictions(ts, published["version"], current)
+        if stored is not None:
+            return stored, {**info, "source": "batch (calculées à la collecte)"}
+
     lag1, lag2 = _snapshot(ts - pd.Timedelta(hours=1)), _snapshot(ts - pd.Timedelta(hours=2))
     # Habitudes : seulement les heures de la journée visées par les horizons, pour alléger la requête
     target_hours = sorted({int((ts + pd.Timedelta(hours=h)).tz_convert(PARIS_TZ).hour) for h in HORIZONS})
@@ -93,8 +126,7 @@ def _compute_predictions() -> tuple[pd.DataFrame | None, dict]:
     else:
         frame[["bikes_q10", "bikes_q50", "bikes_q90"]] = np.nan
 
-    info = {"snapshot_at": ts.tz_convert(PARIS_TZ), "model": published, "horizons": list(HORIZONS)}
-    return frame.reset_index(drop=True), info
+    return frame.reset_index(drop=True), {**info, "source": "à la demande"}
 
 
 def predict() -> tuple[pd.DataFrame | None, dict]:

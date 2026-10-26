@@ -1,0 +1,64 @@
+name: train
+
+# Entraînement des modèles de prévision à la demande : depuis l'onglet Actions, ou depuis le
+# bouton du panneau MLOps de l'application (API GitHub, jeton limité à ce workflow).
+# Le modèle n'est publié que s'il bat les baselines et le modèle en production.
+on:
+  workflow_dispatch:
+    inputs:
+      min_days:
+        description: "Historique minimal exigé, en jours"
+        default: "7"
+        required: true
+      publish:
+        description: "Publier si le modèle gagne (sinon : test, métriques seulement)"
+        type: choice
+        options: ["true", "false"]
+        default: "true"
+      reason:
+        description: "Pourquoi cet entraînement (tracé dans l'historique)"
+        default: "lancé à la main"
+        required: false
+
+permissions:
+  id-token: write   # OIDC : identifiants AWS temporaires, aucune clé stockée
+  contents: read
+
+# Un seul entraînement à la fois
+concurrency:
+  group: velib-train
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      LAKE_ROOT: s3://${{ vars.S3_BUCKET }}/lake
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      PIPELINE_ORCHESTRATOR: github-actions
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pipeline/requirements.txt
+
+      - run: pip install -r pipeline/requirements.txt
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Entraînement, évaluation et décision champion / challenger
+        env:
+          MIN_DAYS: ${{ inputs.min_days }}
+          PUBLISH: ${{ inputs.publish }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          FLAGS=""
+          if [ "$PUBLISH" = "false" ]; then FLAGS="--no-publish"; fi
+          python -m pipeline.run forecast --min-days "$MIN_DAYS" $FLAGS --trigger "github (à la demande)" --reason "$REASON"

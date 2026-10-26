@@ -2,7 +2,8 @@
 velib_lakehouse.py — DAGs Airflow 3 du lakehouse Vélib' (collecteur principal).
 
 - velib_ingest_hourly : API Vélib' -> bronze -> silver, toutes les heures à :05
-- velib_daily_gold    : OPTIMIZE + VACUUM silver, gold dbt (Cosmos), embeddings, météo et monitoring, à 13:15
+- velib_daily_gold    : OPTIMIZE + VACUUM silver, gold dbt (Cosmos), embeddings, météo, monitoring
+                        puis réentraînement si une règle MLOps le demande (pipeline/mlops.py), à 13:15
 - velib_train_forecast : entraînement des modèles de prévision, lancé à la main (bouton Trigger)
 
 Le code métier est celui de pipeline/ (le même que GitHub Actions, collecteur de secours).
@@ -114,6 +115,15 @@ def velib_daily_gold():
         return evaluate_production()
 
     @task.external_python(python=VENV_PYTHON, expect_airflow=False)
+    def retrain_if_needed() -> dict:
+        import sys
+        sys.path.insert(0, "/opt/project")
+        from pipeline.mlops import retrain_if_needed as retrain
+        # Après le monitoring : aucun modèle, modèle trop vieux, dérive ou baisse d'AUC → réentraînement,
+        # publié seulement s'il bat les baselines et le modèle en production
+        return retrain()
+
+    @task.external_python(python=VENV_PYTHON, expect_airflow=False)
     def mark_daily_done() -> str:
         import sys
         sys.path.insert(0, "/opt/project")
@@ -121,17 +131,17 @@ def velib_daily_gold():
         # Signale à GitHub Actions (secours) que le job du jour est fait
         return mark_done("daily")
 
-    external, monitor = fetch_external(), monitor_model()
+    external, monitor, retrain = fetch_external(), monitor_model(), retrain_if_needed()
     embed, done = embed_profiles(), mark_daily_done()
 
     optimize_vacuum_silver() >> gold >> [embed, external]
-    external >> monitor
-    [embed, monitor] >> done
+    external >> monitor >> retrain
+    [embed, retrain] >> done
 
 
 @dag(
     dag_id="velib_train_forecast",
-    # Pas de planification : l'entraînement se lance à la main, avec ses paramètres
+    # Entraînement à la demande (le réentraînement automatique est dans velib_daily_gold)
     schedule=None,
     start_date=START,
     catchup=False,
@@ -153,7 +163,7 @@ def velib_train_forecast():
         import sys
         sys.path.insert(0, "/opt/project")
         from pipeline.forecast import train_forecast as train
-        return train(min_days=int(min_days), publish=bool(publish))
+        return train(min_days=int(min_days), publish=bool(publish), trigger="airflow (manuel)")
 
     train_forecast("{{ params.min_days }}", "{{ params.publish }}")
 

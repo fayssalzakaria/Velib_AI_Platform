@@ -6,6 +6,7 @@ run.py — Point d'entrée du pipeline (exécuté par GitHub Actions).
     python -m pipeline.run backfill   # importe les anciens CSV S3 dans silver
     python -m pipeline.run embed      # embeddings des profils gold (+ Qdrant)
     python -m pipeline.run forecast   # entraîne les modèles de prévision (lancé à la main)
+    python -m pipeline.run retrain    # réentraîne seulement si une règle MLOps le demande (job quotidien)
         [--min-days 3] [--no-publish]  # historique minimal ; test sans servir les modèles dans l'app
     python -m pipeline.run external   # météo et vacances scolaires (features du modèle)
     python -m pipeline.run monitor    # compare les prévisions passées à la réalité (monitoring)
@@ -66,9 +67,12 @@ def ingest() -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="Pipeline lakehouse Vélib'")
-    parser.add_argument("command", choices=["ingest", "maintain", "backfill", "embed", "forecast", "external", "monitor"])
+    parser.add_argument("command", choices=["ingest", "maintain", "backfill", "embed", "forecast", "retrain",
+                                            "external", "monitor"])
     parser.add_argument("--min-days", type=int, default=None, help="forecast : historique minimal en jours")
     parser.add_argument("--no-publish", action="store_true", help="forecast : test, modèles non servis par l'app")
+    parser.add_argument("--trigger", default="manuel", help="forecast : qui lance l'entraînement (tracé)")
+    parser.add_argument("--reason", default="", help="forecast : pourquoi (tracé dans l'historique)")
     args = parser.parse_args()
 
     if args.command == "ingest":
@@ -83,7 +87,11 @@ def main():
         result = run_embed()
     elif args.command == "forecast":
         from pipeline.forecast import train_forecast
-        result = train_forecast(min_days=args.min_days, publish=not args.no_publish)
+        result = train_forecast(min_days=args.min_days, publish=not args.no_publish,
+                                trigger=args.trigger, reason=args.reason)
+    elif args.command == "retrain":
+        from pipeline.mlops import retrain_if_needed
+        result = retrain_if_needed(min_days=args.min_days)
     elif args.command == "external":
         from pipeline.external import run_external
         result = run_external()

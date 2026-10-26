@@ -11,8 +11,13 @@ Trois questions, un modèle par question (l'horizon est une feature) :
 3. LightGBM avec early stopping sur la validation
 4. évaluation par horizon face à deux baselines : persistance et habitudes de la station
 5. chaque question est publiée seulement si son modèle bat les baselines
+6. champion / challenger : le nouveau modèle ne remplace celui en production que s'il fait au
+   moins aussi bien sur la même période de test (et mieux sur au moins une question)
 
-    python -m pipeline.run forecast
+Chaque entraînement est tracé dans models/forecast/history.json (déclencheur, raison, décision).
+
+    python -m pipeline.run forecast            # à la main
+    python -m pipeline.run retrain             # automatique : seulement si pipeline/mlops.py le juge utile
 """
 import logging
 import os
@@ -28,7 +33,8 @@ from pipeline.settings import delta_storage_options, silver_uri
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "forecast"
-MIN_DAYS = int(os.environ.get("FORECAST_MIN_DAYS", 14))
+MIN_DAYS = int(os.environ.get("FORECAST_MIN_DAYS", 7))  # une semaine : chaque jour vu au moins une fois
+HISTORY_LENGTH = 50  # entraînements gardés dans history.json
 TEST_SHARE, VALID_SHARE = 0.2, 0.15
 TOP_K = 20
 QUANTILES = (0.1, 0.5, 0.9)
@@ -189,12 +195,91 @@ def _train_bikes(train, valid, test, features):
             "promoted": bool(evaluation["model"]["all"]["mae"] < best_baseline)}
 
 
-def train_forecast(silver: pd.DataFrame | None = None, weather: pd.DataFrame | None = None,
-                   school: pd.DataFrame | None = None, min_days: int | None = None, publish: bool = True) -> dict:
+# ---------------------------------------------------------------- champion / challenger
+
+def _champion_scores(test: pd.DataFrame, features: list[str]) -> dict | None:
     """
-    Entraîne les 3 familles de modèles, lancé à la main (Airflow ou ligne de commande).
+    Le modèle en production (champion) rejoue la période de test du nouveau modèle (challenger) :
+    les deux sont jugés sur exactement les mêmes lignes. None s'il n'y a pas de champion ou s'il
+    utilise d'autres features (comparaison impossible : on repart de zéro).
+    """
+    import lightgbm as lgb
+    from sklearn.metrics import roc_auc_score
+
+    from src.ml.features import TARGETS
+    from src.ml.storage import model_uri, read_json, read_text
+
+    champion = read_json(model_uri(MODEL_NAME, "latest.json"))
+    if not champion or champion.get("features") != features:
+        return None
+
+    def booster(family, key):
+        return lgb.Booster(model_str=read_text(model_uri(MODEL_NAME, champion["version"], f"{family}_{key}.txt")))
+
+    scores = {}
+    for family in champion.get("promoted", []):
+        y = test[TARGETS[family]].to_numpy()
+        if family == "bikes":
+            median = np.clip(booster("bikes", "q50").predict(test[features]), 0, None)
+            scores[family] = {"mae": round(float(np.mean(np.abs(y - median))), 3)}
+        elif y.min() != y.max():  # AUC indéfinie avec une seule classe : pas de comparaison
+            scores[family] = {"auc": round(float(roc_auc_score(y, booster(family, "model").predict(test[features]))), 4)}
+    return {"version": champion["version"], "promoted": champion.get("promoted", []), "scores": scores}
+
+
+def decide_promotion(results: dict, champion: dict | None) -> tuple[list[str], str]:
+    """
+    Familles à publier et raison de la décision.
+    Le challenger doit battre les baselines ; s'il y a un champion, il ne doit perdre sur aucune
+    des questions que le champion sert déjà, et gagner sur au moins une (ou en servir une de plus).
+    """
+    challenger = [family for family, result in results.items() if result["promoted"]]
+    if not challenger:
+        return [], "le nouveau modèle ne bat pas les baselines"
+    if champion is None:
+        return challenger, "aucun modèle comparable en production : publication"
+
+    better, worse = [], []
+    for family in champion["promoted"]:
+        if family not in challenger:
+            worse.append(family)
+            continue
+        score = champion["scores"].get(family)
+        if score is None:
+            continue
+        mine = results[family]["evaluation"]["model"]["all"]
+        if "mae" in score:
+            better += [family] if mine["mae"] < score["mae"] else []
+            worse += [family] if mine["mae"] > score["mae"] else []
+        else:
+            better += [family] if mine["auc"] > score["auc"] else []
+            worse += [family] if mine["auc"] < score["auc"] else []
+    new_families = sorted(set(challenger) - set(champion["promoted"]))
+
+    if worse:
+        return [], f"champion {champion['version']} conservé : le challenger est moins bon sur {', '.join(worse)}"
+    if not better and not new_families:
+        return [], f"champion {champion['version']} conservé : aucune amélioration"
+    gains = better + [f"{family} (nouvelle question servie)" for family in new_families]
+    return challenger, f"bat le champion {champion['version']} sur {', '.join(gains)}"
+
+
+def _record_history(entry: dict) -> None:
+    """Ajoute l'entraînement à l'historique du registre (les plus récents en premier)."""
+    from src.ml.storage import model_uri, read_json, write_json
+
+    runs = (read_json(model_uri(MODEL_NAME, "history.json")) or {}).get("runs", [])
+    write_json(model_uri(MODEL_NAME, "history.json"), {"runs": [entry, *runs][:HISTORY_LENGTH]})
+
+
+def train_forecast(silver: pd.DataFrame | None = None, weather: pd.DataFrame | None = None,
+                   school: pd.DataFrame | None = None, min_days: int | None = None, publish: bool = True,
+                   trigger: str = "manuel", reason: str = "") -> dict:
+    """
+    Entraîne les 3 familles de modèles et décide de leur publication (baselines, puis champion).
     min_days : historique minimal exigé (MIN_DAYS par défaut).
     publish=False : entraînement de test, les métriques sont enregistrées mais l'app ne sert pas ces modèles.
+    trigger / reason : qui a lancé l'entraînement et pourquoi (tracés dans l'historique).
     """
     from pipeline.external import read_school_holidays, read_weather
     from src.ml.features import FEATURES, HORIZONS, TARGETS, training_frame
@@ -209,7 +294,8 @@ def train_forecast(silver: pd.DataFrame | None = None, weather: pd.DataFrame | N
         result = {"status": "skipped", "days": int(days),
                   "reason": f"{days} jour{'s' if days > 1 else ''} d'historique sur {min_days} requis"}
         logger.info(f"Modèles non entraînés : {result['reason']}")
-        write_json(model_uri(MODEL_NAME, "status.json"), {**result, "checked_at": datetime.now(timezone.utc)})
+        write_json(model_uri(MODEL_NAME, "status.json"), {**result, "trigger": trigger,
+                                                          "checked_at": datetime.now(timezone.utc)})
         return result
 
     sample = min(1.0, MAX_ROWS_PER_HORIZON / len(silver))
@@ -223,6 +309,11 @@ def train_forecast(silver: pd.DataFrame | None = None, weather: pd.DataFrame | N
         "bikes": _train_bikes(train, valid, test, FEATURES),
     }
 
+    champion = _champion_scores(test, FEATURES)
+    promoted, decision = decide_promotion(results, champion)
+    if not publish:
+        decision = f"test, non publié ({decision})"
+        promoted = []
     version = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     for family, result in results.items():
         for key, model in result["models"].items():
@@ -242,9 +333,13 @@ def train_forecast(silver: pd.DataFrame | None = None, weather: pd.DataFrame | N
             family: {k: v for k, v in result.items() if k != "models"} | {"files": sorted(result["models"])}
             for family, result in results.items()
         },
-        "promoted": [family for family, result in results.items() if result["promoted"]] if publish else [],
+        "promoted": promoted,
         "beats_baselines": [family for family, result in results.items() if result["promoted"]],
         "published": publish,
+        "trigger": trigger,
+        "trigger_reason": reason,
+        "champion": champion,
+        "decision": decision,
         "feature_importance_gain": dict(sorted(zip(FEATURES, importance.round(1).tolist()), key=lambda i: -i[1])),
         "external_data": {"weather": weather is not None, "school_holidays": school is not None},
         "reference_distribution": reference_distribution(train, FEATURES),
@@ -254,10 +349,15 @@ def train_forecast(silver: pd.DataFrame | None = None, weather: pd.DataFrame | N
         write_json(model_uri(MODEL_NAME, "latest.json"), metrics)
     status = "trained" if publish else "test"
     write_json(model_uri(MODEL_NAME, "status.json"), {"status": status, "version": version,
-                                                      "promoted": metrics["promoted"],
-                                                      "checked_at": datetime.now(timezone.utc)})
+                                                      "promoted": promoted, "decision": decision,
+                                                      "trigger": trigger, "checked_at": datetime.now(timezone.utc)})
 
     summary = {family: {"score": r["evaluation"]["model"]["all"].get("auc", r["evaluation"]["model"]["all"].get("mae")),
                         "bat les baselines": r["promoted"]} for family, r in results.items()}
-    logger.info(f"Modèles {version} ({'publiés' if publish else 'test, non publiés'}) : {summary}")
-    return {"status": status, "version": version, "promoted": metrics["promoted"], "summary": summary}
+    _record_history({
+        "version": version, "trained_at": metrics["trained_at"], "trigger": trigger, "reason": reason,
+        "days_of_history": int(days), "published": bool(promoted), "promoted": promoted, "decision": decision,
+        "scores": {family: s["score"] for family, s in summary.items()},
+    })
+    logger.info(f"Modèles {version} : {decision} — {summary}")
+    return {"status": status, "version": version, "promoted": promoted, "decision": decision, "summary": summary}

@@ -1,7 +1,8 @@
 """
 forecast_panel.py — Prévisions LightGBM de 1 à 6 heures : risque de station vide ou pleine, vélos attendus.
 
-Affiche aussi la fiche des modèles publiés et leur suivi en production (lu dans le gold).
+Affiche aussi la fiche des modèles publiés, leur suivi en production (lu dans le gold) et le
+panneau MLOps (cycle de vie, historique des entraînements, lancement d'un entraînement).
 """
 import pandas as pd
 import plotly.express as px
@@ -12,6 +13,7 @@ import streamlit as st
 from src.data import lake
 from src.data.filters import search_stations
 from src.ml import forecast
+from src.ui.mlops_panel import render_mlops
 
 QUESTIONS = {
     "vide": {"risk": "risk_empty", "now": "is_empty_now", "label": "Risque d'être vide",
@@ -170,8 +172,8 @@ def _production_performance(model: dict) -> None:
 
 def render_forecast() -> None:
     """
-    Section Prévisions. L'entraînement est lancé à la main ; un modèle n'est publié que s'il bat
-    les baselines, d'où les messages qui expliquent pourquoi rien n'est affiché.
+    Section Prévisions. Un modèle n'est publié que s'il bat les baselines et le modèle en production,
+    d'où les messages qui expliquent pourquoi rien n'est affiché.
     """
     st.subheader("🔮 Prévisions de 1 à 6 heures")
     if not lake.is_configured():
@@ -187,9 +189,10 @@ def render_forecast() -> None:
         elif status.get("status") == "test":
             st.info("Dernier entraînement : un test, ses modèles ne sont pas publiés dans l'application.")
         elif status.get("status") == "trained" and not status.get("promoted"):
-            st.info("Les derniers modèles entraînés ne battent pas les baselines : ils n'ont pas été publiés.")
+            st.info(f"Dernier entraînement non publié : {status.get('decision', 'il ne bat pas les baselines')}.")
         else:
             st.info(info.get("reason", "Prévision indisponible."))
+        render_mlops()
         st.divider()
         return
 
@@ -202,7 +205,7 @@ def render_forecast() -> None:
     at_h = predictions[predictions["horizon"] == horizon]
     target_time = at_h["ts_target"].iloc[0].tz_convert("Europe/Paris")
     st.caption(f"Prévision pour **{target_time:%H:%M}**, à partir du snapshot de {info['snapshot_at']:%d/%m %H:%M} "
-               "(collecte horaire du lakehouse).")
+               f"(collecte horaire du lakehouse) · prévisions {info.get('source', 'à la demande')}.")
 
     # Une station déjà vide (ou pleine) n'est pas une alerte : on classe celles qui risquent de le devenir
     candidates = at_h[at_h[spec["now"]] == 0]
@@ -228,4 +231,5 @@ def render_forecast() -> None:
         _model_card(info["model"])
     with st.expander("📈 Performance en production (monitoring)"):
         _production_performance(info["model"])
+    render_mlops(info.get("source"))
     st.divider()
