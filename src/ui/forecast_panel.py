@@ -4,6 +4,7 @@ forecast_panel.py — Prévisions LightGBM de 1 à 6 heures : risque de station 
 Affiche aussi la fiche des modèles publiés, leur suivi en production (lu dans le gold) et le
 panneau MLOps (cycle de vie, historique des entraînements, lancement d'un entraînement).
 """
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -127,6 +128,20 @@ def _model_card(model: dict) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
+def _one_point_per_day(daily: pd.DataFrame) -> pd.DataFrame:
+    """
+    Le suivi est calculé par version : un jour de changement de modèle compte deux lignes par horizon.
+    Pour les courbes, moyenne pondérée par le nombre de prévisions, un point par jour et par horizon.
+    """
+    def mean(group, column):
+        known = group[column].notna()
+        return np.average(group.loc[known, column], weights=group.loc[known, "predictions"]) if known.any() else np.nan
+
+    def weighted(group):
+        return pd.Series({c: mean(group, c) for c in ("auc_empty", "mae_bikes")} | {"predictions": group["predictions"].sum()})
+    return daily.groupby(["date", "horizon"]).apply(weighted, include_groups=False).reset_index()
+
+
 def _production_performance(model: dict) -> None:
     """Les modèles face à la réalité : prévisions enregistrées à chaque collecte, comparées chaque jour aux observations."""
     daily = _monitoring("model_monitoring_daily")
@@ -135,16 +150,20 @@ def _production_performance(model: dict) -> None:
                 "et comparées à la réalité chaque jour.")
         return
 
-    daily = daily.assign(horizon=daily["horizon"].astype(int).astype(str) + " h")
+    daily = _one_point_per_day(daily).assign(horizon=lambda d: d["horizon"].astype(int).astype(str) + " h")
     col_auc, col_mae = st.columns(2)
     fig = px.line(daily, x="date", y="auc_empty", color="horizon", markers=True,
                   labels={"date": "Jour", "auc_empty": "AUC (vide)", "horizon": "Horizon"})
     fig.update_layout(title="Vide : qualité jour par jour", height=300, margin=dict(t=40, b=10))
     col_auc.plotly_chart(fig, use_container_width=True)
-    fig = px.line(daily, x="date", y="mae_bikes", color="horizon", markers=True,
-                  labels={"date": "Jour", "mae_bikes": "Erreur moyenne (vélos)", "horizon": "Horizon"})
-    fig.update_layout(title="Vélos : erreur jour par jour", height=300, margin=dict(t=40, b=10))
-    col_mae.plotly_chart(fig, use_container_width=True)
+    if daily["mae_bikes"].isna().all():
+        col_mae.markdown("**Vélos : erreur jour par jour**")
+        col_mae.info("Pas de suivi : le modèle vélos n'est pas en production (il ne bat pas encore les baselines).")
+    else:
+        fig = px.line(daily, x="date", y="mae_bikes", color="horizon", markers=True,
+                      labels={"date": "Jour", "mae_bikes": "Erreur moyenne (vélos)", "horizon": "Horizon"})
+        fig.update_layout(title="Vélos : erreur jour par jour", height=300, margin=dict(t=40, b=10))
+        col_mae.plotly_chart(fig, use_container_width=True)
 
     col_calib, col_drift = st.columns(2)
     calibration = _monitoring("model_calibration")
