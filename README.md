@@ -14,6 +14,8 @@ Plateforme Data & IA sur le réseau Vélib' de Paris (~1 500 stations) :
 - Application : [velib-data-pipeline.streamlit.app](https://velib-data-pipeline-e8bwwhyt8nevmwfcbfq5sa.streamlit.app/) (si elle est en veille, cliquer sur « Yes, get this app back up » : elle redémarre en ~30 s)
 - 🎬 **Vidéo de présentation** : [Video_app_velib.mp4](Video_app_velib.mp4) (temps réel, historique, assistant, agent, agent opérateur multi-agents, métriques de qualité et de coût)
 
+![Le réseau Vélib' en temps réel](assets/01_realtime.png)
+
 ---
 
 ## Pourquoi une v2 « low-cost »
@@ -96,6 +98,8 @@ Streamlit Cloud (DuckDB en lecture seule)
 - historique d'une station ;
 - export CSV.
 
+🎬 Démo du mode Historique : [09_history_demo_video.mp4](assets/09_history_demo_video.mp4)
+
 ### Prévision ML : vide, pleine, nombre de vélos, de 1 à 6 heures
 
 Trois questions, un modèle LightGBM par question, l'horizon (1 à 6 h) étant une feature :
@@ -114,7 +118,9 @@ Trois questions, un modèle LightGBM par question, l'horizon (1 à 6 h) étant u
 | Garde-fous | mêmes features à l'entraînement et en prédiction (`src/ml/features.py`), vérifié par les tests pour chaque horizon |
 | Monitoring | à chaque collecte, les prévisions des 6 horizons sont enregistrées avec leurs features ; chaque jour : AUC vide/pleine, erreur sur les vélos et couverture **par jour et par horizon**, calibration, dérive des features (PSI) |
 
-Dans l'app (mode Temps réel) : choix de l'horizon et de la question, stations à réapprovisionner ou à délester, carte du risque, courbe des vélos attendus d'une station avec son intervalle, fiche des modèles, performance en production et panneau MLOps. L'IA dispose d'un outil `forecast_station` qui comprend « dans 3 h » ou « à 18h ».
+Dans l'app (mode Temps réel) : choix de l'horizon et de la question, stations à réapprovisionner ou à délester, carte du risque, courbe des vélos attendus d'une station avec son intervalle, fiche des modèles, performance en production et panneau MLOps. L'IA dispose d'un outil `forecast_station` qui comprend « dans 3 h » ou « à 18h ». Les prévisions suivent la grille de la collecte : 1 à 6 h après le dernier snapshot, à l'heure pile (« à 14h30 » est ramené à 14h, et l'heure visée est toujours affichée).
+
+![Prévision d'une station : vélos attendus avec leur intervalle de 80 %, risques de vide et de plein par heure](assets/06_forecast.png)
 
 ### MLOps : le cycle de vie du modèle
 
@@ -139,6 +145,12 @@ Dans l'app (mode Temps réel) : choix de l'horizon et de la question, stations �
 | **Monitoring** | AUC vide/pleine, erreur et couverture des vélos par jour, horizon et version ; calibration ; dérive des features (PSI) |
 | **Pilotage** | panneau « MLOps » de l'app : modèle en production, historique des entraînements, bouton « Lancer un entraînement » (mot de passe administrateur) qui déclenche le workflow GitHub `train`. Rien n'est entraîné dans l'app |
 
+Historique réel des entraînements : une dérive météo (PSI > 0,25 sur la température et le vent) déclenche deux réentraînements automatiques ; le premier challenger, moins bon que le champion, est rejeté, le second le bat et ajoute la prévision du nombre de vélos.
+
+![Panneau MLOps : modèle en production et historique des entraînements](assets/07_mlops.png)
+
+![Monitoring en production : AUC réelle par jour et par horizon, calibration, dérive des features](assets/08_monitoring.png)
+
 ### IA
 
 | Onglet | Principe |
@@ -147,6 +159,18 @@ Dans l'app (mode Temps réel) : choix de l'horizon et de la question, stations �
 | 🤖 **Agent** | **agent** : le LLM choisit ses outils par function calling (état actuel, anomalies, historique, prévision), sur 3 tours maximum |
 | 🧭 **Opérateur** | **graphe LangGraph de type superviseur** : un superviseur choisit les spécialistes (temps réel, prévision, historique), exécutés en parallèle ; un planificateur propose des déplacements de vélos ; un vérificateur déterministe contrôle stations, stocks, bornes libres et distances, et renvoie corriger le plan (2 fois au plus). Seules les actions vérifiées sont affichées |
 | 📊 **Qualité & consommation** | métriques de la session, banc d'évaluation Assistant vs Agent et banc de l'agent opérateur |
+
+**Assistant** : réponse notée par le juge, avec appels LLM, tokens, latence et coût.
+
+![Assistant : réponse jugée, tracée et chiffrée](assets/03_assistant.png)
+
+**Agent** : le LLM appelle lui-même l'outil de prévision. Le juge (Claude Haiku) repère ici une affirmation non fondée : « au moins 2 vélos », alors que le bas de l'intervalle descend à 0.
+
+![Agent : choix des outils et évaluation](assets/04_agent.png)
+
+**Opérateur** : superviseur, spécialistes, planificateur, puis vérificateur à règles ; seules les actions vérifiées sont proposées.
+
+![Agent opérateur multi-agents : plan de rééquilibrage vérifié](assets/05_operator.png)
 
 Les outils sont définis **une seule fois** comme outils LangChain ([src/ai/toolkit.py](src/ai/toolkit.py)) : leurs schémas pour Groq et pour Claude en sont générés.
 
@@ -244,7 +268,7 @@ GitHub Actions utilise le secret `AWS_ROLE_ARN` (OIDC) et les variables `S3_BUCK
 - L'API ne donne que l'état courant : une heure non collectée (PC éteint et GitHub en retard) est perdue.
 - Les profils historiques sont recalculés chaque jour : ils ont jusqu'à un jour de retard.
 - Le modèle de prévision a besoin de plusieurs jours de collecte pour apprendre les habitudes de chaque jour de la semaine.
-- Les prévisions partent du dernier snapshot horaire, pas de l'instant exact de la question.
+- Les prévisions partent du dernier snapshot horaire, pas de l'instant exact de la question, et ne visent que des heures pleines : la réalité n'étant observée qu'à chaque collecte, une prévision pour 14h30 ne pourrait être ni apprise ni vérifiée. Plus de finesse demanderait une collecte plus fréquente.
 - Le nombre de vélos reste difficile à prévoir à quelques heures : la persistance est une baseline très forte, et le modèle « vélos » n'est servi que lorsqu'il la bat (les questions vide / pleine, elles, la battent nettement).
 - Champion / challenger compare les modèles sur la période de test la plus récente : sur peu de jours, la décision reste sensible au bruit.
 - L'agent opérateur estime les distances à vol d'oiseau (2 km maximum), sans itinéraire réel.
