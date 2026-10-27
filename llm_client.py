@@ -395,13 +395,14 @@ def verify_relevance(
     answer: str,
     context: str,
     evaluator_name: str = "système RAG",
+    context_chars: int = JUDGE_CONTEXT_CHARS,
 ) -> tuple[int, str]:
     """
     Note la pertinence d'une réponse (0-100) et l'explique.
     Juge : Claude Haiku 5.5 si disponible (un autre modèle que celui qui répond), sinon Groq.
     """
     content = (f"Système évalué : {evaluator_name}\n\nQuestion :\n{question}\n\n"
-               f"Données utilisées :\n{context[:JUDGE_CONTEXT_CHARS]}\n\nRéponse générée :\n{answer[:JUDGE_ANSWER_CHARS]}")
+               f"Données utilisées :\n{context[:context_chars]}\n\nRéponse générée :\n{answer[:JUDGE_ANSWER_CHARS]}")
     try:
         if claude_available():
             response = call_claude(model=CLAUDE_JUDGE_MODEL, system=_JUDGE_SYSTEM,

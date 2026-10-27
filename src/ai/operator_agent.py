@@ -29,6 +29,7 @@ from src.ai.toolkit import build_toolkit, run_tool
 MAX_CORRECTIONS = 2
 MAX_DISTANCE_KM = 2.0   # au-delà, un déplacement de vélos n'est plus réaliste pour une tournée
 MAX_CANDIDATES = 25     # par liste, pour garder un prompt du planificateur de taille raisonnable
+OPERATOR_JUDGE_CONTEXT_CHARS = 60000  # le contexte du planificateur entier (≈ 15 000 tokens au plus)
 SPECIALISTS = ("temps_reel", "prevision", "historique")
 
 
@@ -47,6 +48,7 @@ class OperatorState(TypedDict, total=False):
     issues: list[str]
     corrections: int
     models: Annotated[list, operator.add]
+    planner_context: str                        # données vues par le planificateur, reprises par le juge
 
 
 @dataclass
@@ -261,13 +263,13 @@ def build_graph(df: pd.DataFrame, rag_documents=None, qdrant_client=None):
             "historique": state["facts"].get("historique"),
             "prevision_disponible": state["facts"].get("prevision", {}).get("disponible", False),
         }
-        prompt = json.dumps(context, ensure_ascii=False, default=str)
+        prompt = base = json.dumps(context, ensure_ascii=False, default=str)
         if state.get("issues"):
             prompt += ("\n\nTon plan précédent a été refusé par le vérificateur. Corrige ces problèmes :\n- "
                        + "\n- ".join(state["issues"]))
         plan, model = call_complex_json(system=_PLANNER_SYSTEM, prompt=prompt, schema=_PLAN_SCHEMA, effort="high")
         label = "Planificateur" if not state.get("issues") else f"Planificateur (correction {state.get('corrections', 0)})"
-        return {"plan": plan, "facts": {"candidats": candidates}, "models": [model],
+        return {"plan": plan, "facts": {"candidats": candidates}, "models": [model], "planner_context": base,
                 "steps": [f"{label} : {len(plan.get('actions', []))} déplacements proposés"]}
 
     def verifier(state: OperatorState) -> dict:
@@ -353,9 +355,12 @@ def run_operator(question: str, df: pd.DataFrame, rag_documents=None, qdrant_cli
             trace.candidates = {k: v for k, v in candidates.items() if not k.startswith("_")}
             trace.tools_called = state.get("specialists", [])
             answer = format_plan(trace.plan, dropped)
+            # Le juge voit exactement ce qu'a vu le planificateur, en entier : sinon il prend pour
+            # inventés des chiffres (anomalies, paires lointaines) coupés de son contexte
             trace.relevance_score, trace.relevance_explanation = verify_relevance(
                 question=question, answer=answer, evaluator_name="agent opérateur Vélib",
-                context=json.dumps(trace.candidates, ensure_ascii=False))
+                context=state.get("planner_context") or json.dumps(trace.candidates, ensure_ascii=False),
+                context_chars=OPERATOR_JUDGE_CONTEXT_CHARS)
         except Exception as e:
             answer = f"Erreur agent opérateur : {e}"
     trace.latency_s = round(time.perf_counter() - started, 2)
