@@ -30,6 +30,15 @@ MAX_CORRECTIONS = 2
 MAX_DISTANCE_KM = 2.0   # au-delà, un déplacement de vélos n'est plus réaliste pour une tournée
 MAX_CANDIDATES = 25     # par liste, pour garder un prompt du planificateur de taille raisonnable
 OPERATOR_JUDGE_CONTEXT_CHARS = 60000  # le contexte du planificateur entier (≈ 15 000 tokens au plus)
+# Un plan n'est pas une réponse factuelle : les quantités sont des décisions, et le vérificateur les a contrôlées
+OPERATOR_JUDGE_CRITERIA = (
+    "La réponse est un PLAN d'actions. Les nombres de vélos à déplacer et leur total sont des décisions du "
+    "planificateur, pas des données à retrouver : ne les compte pas comme inventés. Le respect des stocks, des "
+    "bornes libres et des distances a déjà été contrôlé par un vérificateur à règles (résultat ci-dessous). "
+    "Juge : (1) les faits cités sur les stations (vélos, bornes, risques, distances, anomalies) sont-ils "
+    "exacts d'après les données ? (2) les actions sont-elles pertinentes (stations vides ou à risque servies, "
+    "sources chargées, trajets courts) ? (3) le résumé est-il cohérent avec les actions ?"
+)
 SPECIALISTS = ("temps_reel", "prevision", "historique")
 
 
@@ -206,6 +215,7 @@ _PLANNER_SYSTEM = (
     "stations EXACTEMENT comme ils apparaissent. Ne retire jamais plus de vélos qu'une station n'en a, ne "
     "dépose jamais plus de vélos qu'il n'y a de bornes libres. Au plus 8 actions, les plus utiles d'abord. "
     "S'il n'y a rien d'utile à faire, renvoie une liste d'actions vide et explique pourquoi. "
+    "Le résumé doit correspondre exactement aux actions : nombre de stations distinctes servies, total de vélos. "
     "Réponds en français."
 )
 
@@ -359,8 +369,10 @@ def run_operator(question: str, df: pd.DataFrame, rag_documents=None, qdrant_cli
             # inventés des chiffres (anomalies, paires lointaines) coupés de son contexte
             trace.relevance_score, trace.relevance_explanation = verify_relevance(
                 question=question, answer=answer, evaluator_name="agent opérateur Vélib",
-                context=state.get("planner_context") or json.dumps(trace.candidates, ensure_ascii=False),
-                context_chars=OPERATOR_JUDGE_CONTEXT_CHARS)
+                context=(state.get("planner_context") or json.dumps(trace.candidates, ensure_ascii=False))
+                + f"\n\nVérificateur à règles : {len(trace.plan.get('actions', []))} action(s) validée(s), "
+                  f"{len(dropped)} écartée(s), {trace.corrections} correction(s).",
+                context_chars=OPERATOR_JUDGE_CONTEXT_CHARS, criteria=OPERATOR_JUDGE_CRITERIA)
         except Exception as e:
             answer = f"Erreur agent opérateur : {e}"
     trace.latency_s = round(time.perf_counter() - started, 2)
