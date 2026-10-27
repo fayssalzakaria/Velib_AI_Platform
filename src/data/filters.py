@@ -18,11 +18,19 @@ def normalize_name(text: str) -> str:
 
 
 def search_stations(df: pd.DataFrame, query: str) -> pd.DataFrame:
-    """Stations dont le nom contient tous les mots de la recherche, sans tenir compte des accents ni de l'ordre."""
+    """
+    Stations dont le nom contient tous les mots de la recherche, sans tenir compte des accents ni de l'ordre.
+    Mots entiers d'abord (« nation » → PLACE DE LA NATION, pas NATIONALE) ; à défaut, morceaux de mots
+    (« republ » → RÉPUBLIQUE), pour une saisie incomplète.
+    """
     words = normalize_name(query).split()
     if not words or df.empty:
         return df.iloc[0:0]
     names = df["name"].map(normalize_name)
+    tokens = names.str.split().map(set)
+    whole = tokens.map(lambda t: all(w in t for w in words))
+    if whole.any():
+        return df[whole]
     mask = pd.Series(True, index=df.index)
     for word in words:
         mask &= names.str.contains(word, regex=False)

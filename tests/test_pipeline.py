@@ -136,12 +136,15 @@ def test_search_stations_ignores_accents_order_and_punctuation():
     df = pd.DataFrame({"name": [
         "ATHÈNES - CLICHY", "MAIRIE DE CLICHY", "BESSIÈRES - PORTE DE CLICHY",
         "PLACE DE LA RÉPUBLIQUE - VOLTAIRE", "BASTILLE - BISCORNET",
+        "ASSEMBLÉE NATIONALE", "PLACE DE LA NATION - PICPUS",
     ]})
     assert len(search_stations(df, "clichy")) == 3
     assert search_stations(df, "porte clichy")["name"].tolist() == ["BESSIÈRES - PORTE DE CLICHY"]
     assert search_stations(df, "republique")["name"].tolist() == ["PLACE DE LA RÉPUBLIQUE - VOLTAIRE"]
     assert search_stations(df, "athenes")["name"].tolist() == ["ATHÈNES - CLICHY"]
     assert search_stations(df, "  ").empty
+    assert search_stations(df, "clich")["name"].nunique() == 3               # saisie incomplète
+    assert search_stations(df, "nation")["name"].tolist() == ["PLACE DE LA NATION - PICPUS"]  # mot entier d'abord
 
 
 class _FakeResponse:
