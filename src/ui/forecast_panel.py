@@ -158,7 +158,11 @@ def _production_performance(model: dict) -> None:
     col_auc.plotly_chart(fig, use_container_width=True)
     if daily["mae_bikes"].isna().all():
         col_mae.markdown("**Vélos : erreur jour par jour**")
-        col_mae.info("Pas de suivi : le modèle vélos n'est pas en production (il ne bat pas encore les baselines).")
+        if "bikes" in model.get("promoted", []):
+            col_mae.info("Modèle vélos en production depuis peu : premières mesures après le prochain "
+                         "monitoring (chaque nuit).")
+        else:
+            col_mae.info("Pas de suivi : le modèle vélos n'est pas en production (il ne bat pas encore les baselines).")
     else:
         fig = px.line(daily, x="date", y="mae_bikes", color="horizon", markers=True,
                       labels={"date": "Jour", "mae_bikes": "Erreur moyenne (vélos)", "horizon": "Horizon"})
